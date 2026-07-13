@@ -4,13 +4,11 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { fileURLToPath } from 'node:url'
 import { logger } from '../lib/logger'
+import { orchestratorScript } from '../lib/orchestrator-paths'
+import { resolvePythonExe } from '../lib/python-deps-check'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
-const DEEP_SCRIPT = path.join(PROJECT_ROOT, 'orchestrator', 'spawn_deepresearch.py')
+const DEEP_SCRIPT = orchestratorScript('spawn_deepresearch.py')
 const DOCS_DIR = path.join(os.homedir(), 'Documents')
 
 const MODES = ['quick', 'standard', 'deep', 'ultradeep'] as const
@@ -39,7 +37,7 @@ export function deepResearchRouter() {
         return res.status(400).json({ error: 'invalid mode' })
       }
       const slug = slugify(title || query)
-      const pyExe = process.env.PYTHON_EXE || 'python'
+      const pyExe = await resolvePythonExe()
 
       const child = spawn(pyExe, [DEEP_SCRIPT], {
         shell: false,

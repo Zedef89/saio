@@ -426,9 +426,7 @@ export function metricsRouter(dataDir: string) {
   const CACHE_TTL = 5 * 60_000
 
   router.get('/vault-health', async (_req, res) => {
-    const VAULT_PATH =
-      process.env.VAULT_PATH ||
-      'C:\\Users\\info\\.claude\\projects\\C--Users-info-Desktop-CLAUDE-WORLD\\memory'
+    const VAULT_PATH = process.env.VAULT_PATH || path.join(os.homedir(), 'Obsidian')
     if (vaultHealthCache && Date.now() - vaultHealthCache.ts < CACHE_TTL) {
       return res.json(vaultHealthCache.data)
     }
@@ -452,9 +450,7 @@ export function metricsRouter(dataDir: string) {
 
   // List recent files by category for Knowledge Growth drill-down
   router.get('/knowledge-files', async (req, res) => {
-    const VAULT_PATH =
-      process.env.VAULT_PATH ||
-      'C:\\Users\\info\\.claude\\projects\\C--Users-info-Desktop-CLAUDE-WORLD\\memory'
+    const VAULT_PATH = process.env.VAULT_PATH || path.join(os.homedir(), 'Obsidian')
     const cat = String(req.query.category || '').toLowerCase()
     const days = Number(req.query.days || 7)
     const since = Date.now() - days * 24 * 3600 * 1000
@@ -487,9 +483,7 @@ export function metricsRouter(dataDir: string) {
   })
 
   router.get('/knowledge-growth', async (_req, res) => {
-    const VAULT_PATH =
-      process.env.VAULT_PATH ||
-      'C:\\Users\\info\\.claude\\projects\\C--Users-info-Desktop-CLAUDE-WORLD\\memory'
+    const VAULT_PATH = process.env.VAULT_PATH || path.join(os.homedir(), 'Obsidian')
     if (knowledgeGrowthCache && Date.now() - knowledgeGrowthCache.ts < CACHE_TTL) {
       return res.json(knowledgeGrowthCache.data)
     }

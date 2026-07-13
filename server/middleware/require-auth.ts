@@ -27,6 +27,16 @@ declare module 'express-serve-static-core' {
 
 const DEV_USER = { email: 'dev@local', role: 'owner' as const, sid: 'dev-bypass' }
 
+// Richiesta LOCALE diretta = connessione TCP da loopback SENZA header di proxy.
+// Le richieste inoltrate dal tunnel Cloudflare arrivano anch'esse a 127.0.0.1 (cloudflared
+// gira in locale) MA con X-Forwarded-For settato → NON sono considerate locali.
+// Usato per il bypass auth desktop: la webview locale entra senza login, il tunnel no.
+function isLocalDirectRequest(req: Request): boolean {
+  if (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers['forwarded']) return false
+  const ip = req.socket?.remoteAddress || ''
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'
+}
+
 export function makeRequireAuth(dataDir: string) {
   return async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
     // Bypass per cron token già validato
@@ -38,6 +48,24 @@ export function makeRequireAuth(dataDir: string) {
     // Master switch dev: bypassa tutto
     if (!isAuthRequired()) {
       req.user = DEV_USER
+      next()
+      return
+    }
+    // Desktop remote-only: la webview LOCALE entra senza login; gli accessi dal tunnel
+    // (X-Forwarded-For / CF-Connecting-IP presenti) devono autenticarsi normalmente.
+    if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectRequest(req)) {
+      req.user = DEV_USER
+      next()
+      return
+    }
+    // SSO via Cloudflare Access: gli accessi dal tunnel passano prima da Cloudflare Access,
+    // che verifica l'identità e inietta l'header Cf-Access-Authenticated-User-Email. Se l'email
+    // corrisponde all'owner autorizzato, l'utente è autenticato (Access ha già fatto il lavoro).
+    // Fail-closed: senza Access configurato, l'header manca → 401.
+    const cfEmailHeader = req.headers['cf-access-authenticated-user-email']
+    const ownerEmail = (process.env.DASHBOARD_OWNER_EMAIL || '').trim().toLowerCase()
+    if (typeof cfEmailHeader === 'string' && ownerEmail && cfEmailHeader.trim().toLowerCase() === ownerEmail) {
+      req.user = { email: cfEmailHeader.trim(), role: 'owner', sid: 'cf-access' }
       next()
       return
     }

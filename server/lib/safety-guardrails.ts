@@ -53,15 +53,64 @@ e chiedi all'utente come procedere. La sicurezza dei dati prevale sul completame
  * V15.0 WS18 — ZIP backup di un path arbitrario in data/backups/.
  * Usato pre-autoconfig vault Obsidian o per snapshot pre-orchestrator session.
  */
+// Cartelle da NON includere nel backup: protette da TCC macOS (danno EPERM),
+// oppure cache/generati che non hanno senso zippare.
+const BACKUP_SKIP_DIRS = new Set([
+  '.Trash',
+  '.Trashes',
+  'Library',
+  '.cache',
+  'node_modules',
+  '.git',
+  '.venv',
+  '__pycache__',
+  '.npm',
+  '.cargo',
+  '.rustup',
+  'Applications',
+])
+
 export async function backupDirectory(opts: {
   sourcePath: string
   dataDir: string
   label: string // es. 'obsidian-pre-autoconfig'
-}): Promise<{ backupPath: string; sizeBytes: number; entries: number }> {
+}): Promise<{ backupPath: string; sizeBytes: number; entries: number; skipped: number }> {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const backupDir = path.join(opts.dataDir, 'backups')
   await fs.mkdir(backupDir, { recursive: true })
   const backupPath = path.join(backupDir, `${opts.label}-${ts}.zip`)
+
+  // Walk manuale: salta le cartelle protette e ignora EPERM/EACCES per-directory
+  // (macOS nega scandir su .Trash, ~/Library ecc.) invece di abortire tutto il backup.
+  let skipped = 0
+  const files: string[] = []
+  async function collect(dir: string): Promise<void> {
+    let dirents
+    try {
+      dirents = await fs.readdir(dir, { withFileTypes: true })
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOENT') {
+        skipped++
+        return
+      }
+      throw err
+    }
+    for (const e of dirents) {
+      if (BACKUP_SKIP_DIRS.has(e.name)) {
+        skipped++
+        continue
+      }
+      const full = path.join(dir, e.name)
+      if (e.isSymbolicLink()) {
+        skipped++
+        continue
+      }
+      if (e.isDirectory()) await collect(full)
+      else if (e.isFile()) files.push(full)
+    }
+  }
+  await collect(opts.sourcePath)
 
   return new Promise((resolve, reject) => {
     const output = createWriteStream(backupPath)
@@ -70,14 +119,19 @@ export async function backupDirectory(opts: {
     archive.on('entry', () => {
       entries++
     })
+    archive.on('warning', (err) => logger.warn('[backup] warning:', err))
     archive.on('error', (err) => reject(err))
     output.on('close', () => {
       const sizeBytes = archive.pointer()
-      logger.info(`[backup] zipped ${opts.sourcePath} → ${backupPath} (${sizeBytes} bytes, ${entries} entries)`)
-      resolve({ backupPath, sizeBytes, entries })
+      logger.info(
+        `[backup] zipped ${opts.sourcePath} → ${backupPath} (${sizeBytes} bytes, ${entries} entries, ${skipped} skipped)`
+      )
+      resolve({ backupPath, sizeBytes, entries, skipped })
     })
     archive.pipe(output)
-    archive.directory(opts.sourcePath, false)
+    for (const f of files) {
+      archive.file(f, { name: path.relative(opts.sourcePath, f) })
+    }
     void archive.finalize()
   })
 }

@@ -331,11 +331,11 @@ export function CronPage() {
       <div className="rounded-md bg-muted/30 border border-border/50 p-3 text-xs text-muted-foreground flex items-start gap-2">
         <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
         <div>
-          Automazioni Windows Task Scheduler che scrivono nel vault Obsidian: imparano dai tuoi errori, trovano nuovi tool,
-          aggiornano l'ecosistema, generano il daily cockpit. <strong>Non serve che la CLI AI sia attiva</strong> — girano in background.
+          Automazioni <strong>launchd</strong> (macOS) e <strong>cron</strong> che girano in background sul tuo Mac — sia quelle
+          di SAIO sia le tue automazioni personali. <strong>Non serve che la CLI AI sia attiva</strong>.
           Usa <strong>Run</strong> per eseguirla ora, <strong>Power</strong> per attivare/disattivare, <strong>+ Nuovo cron</strong> per crearne.
-          <div className="mt-1.5 text-[11px] text-amber-300/80">
-            ⚠ Attivare/disattivare/creare aprono un <strong>popup UAC di Windows</strong>: accetta per completare l'operazione (non serve riavviare la dashboard come admin).
+          <div className="mt-1.5 text-[11px] text-emerald-300/80">
+            ✓ Girano <strong>user-level</strong>: nessun permesso admin richiesto.
           </div>
         </div>
       </div>
@@ -417,7 +417,7 @@ export function CronPage() {
 
       {data && data.tasks.length === 0 && (
         <div className="text-center py-12 text-muted-foreground">
-          Nessuna automazione Obsidian/CLI AI trovata in Task Scheduler.
+          Nessuna automazione trovata (launchd / cron).
         </div>
       )}
 
@@ -426,15 +426,11 @@ export function CronPage() {
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Plus className="w-4 h-4 text-violet-400" /> Nuovo cron Windows
+              <Plus className="w-4 h-4 text-violet-400" /> Nuovo cron
             </DialogTitle>
             <DialogDescription>
-              Crea una nuova automazione Windows Task Scheduler. Verrà prefissata con
-              <code className="bg-muted px-1 rounded mx-1">RM-Dashboard-</code>
-              se non contiene già "obsidian" o "rm-dashboard".
-              <span className="block mt-2 text-emerald-400/80">
-                Se il <strong>Cron Manager</strong> è registrato (default dopo setup), la creazione avviene <strong>senza popup UAC</strong>. Altrimenti, accetta il popup quando appare.
-              </span>
+              Crea una nuova automazione <strong>launchd</strong> (macOS). Gira user-level in background, senza
+              permessi admin. Specifica nome, pianificazione e comando shell.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
@@ -574,7 +570,7 @@ export function CronPage() {
             <DialogTitle>Rinomina automazione</DialogTitle>
             <DialogDescription>
               Cambia il nome di "<span className="font-mono">{renameFor?.name}</span>". Il task viene
-              ricreato in Windows Task Scheduler con i medesimi parametri.
+              ricreato in launchd con i medesimi parametri.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2 py-2">
@@ -619,7 +615,7 @@ export function CronPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Eliminare l'automazione?</AlertDialogTitle>
             <AlertDialogDescription>
-              Stai per cancellare definitivamente "<span className="font-mono">{deleteFor?.name}</span>" da Windows Task Scheduler.
+              Stai per cancellare definitivamente "<span className="font-mono">{deleteFor?.name}</span>" da launchd/cron.
               Questa operazione non può essere annullata. Lo script associato sul filesystem NON viene cancellato.
             </AlertDialogDescription>
           </AlertDialogHeader>

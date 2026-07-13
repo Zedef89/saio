@@ -20,13 +20,17 @@ import fs from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { ptyManager } from '../lib/pty-manager'
 import { resolvePythonExe } from '../lib/python-deps-check'
+import { orchestratorScript } from '../lib/orchestrator-paths'
 import { logger } from '../lib/logger'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
-const SCRIPT_PATH = path.join(PROJECT_ROOT, 'orchestrator', 'perf-snapshot.py')
-const HEALTH_FILE = path.join(PROJECT_ROOT, 'data', 'orchestrator.health')
+const SCRIPT_PATH = orchestratorScript('perf-snapshot.py')
+// Rispetta DASHBOARD_DATA_DIR (impostato dall'app in una dir scrivibile); il
+// fallback PROJECT_ROOT/data serve solo in dev.
+const DATA_DIR = process.env.DASHBOARD_DATA_DIR || path.join(PROJECT_ROOT, 'data')
+const HEALTH_FILE = path.join(DATA_DIR, 'orchestrator.health')
 
 interface PerfSnapshot {
   totalCpuPercent: number

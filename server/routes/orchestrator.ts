@@ -2,16 +2,14 @@ import { Router } from 'express'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { logger } from '../lib/logger'
 import { sanitizeProjectId } from '../lib/sanitize'
 import { resolveSpawnAccount } from '../lib/resolve-spawn-account'
+import { orchestratorScript } from '../lib/orchestrator-paths'
+import { resolvePythonExe } from '../lib/python-deps-check'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
-const SPAWN_SINGLE_SCRIPT = path.join(PROJECT_ROOT, 'orchestrator', 'spawn_single.py')
-const KILL_ONE_SCRIPT = path.join(PROJECT_ROOT, 'orchestrator', 'kill_one.py')
+const SPAWN_SINGLE_SCRIPT = orchestratorScript('spawn_single.py')
+const KILL_ONE_SCRIPT = orchestratorScript('kill_one.py')
 
 export function orchestratorRouter(
   dataDir: string,
@@ -81,7 +79,7 @@ export function orchestratorRouter(
         envOverrides: accountSpec?.envOverrides || {},
       }
 
-      const pyExe = process.env.PYTHON_EXE || 'python'
+      const pyExe = await resolvePythonExe()
       const child = spawn(pyExe, [SPAWN_SINGLE_SCRIPT], {
         shell: false,
         windowsHide: true,
@@ -146,7 +144,7 @@ export function orchestratorRouter(
       return res.json({ ok: false, reason: 'no pid in task', projectId: id })
     }
 
-    const pyExe = process.env.PYTHON_EXE || 'python'
+    const pyExe = await resolvePythonExe()
     const child = spawn(pyExe, [KILL_ONE_SCRIPT, String(pid)], {
       shell: false,
       windowsHide: true,

@@ -269,17 +269,16 @@ export function systemRouter(): Router {
     res.setHeader('Cache-Control', 'no-store')
     res.setHeader('Transfer-Encoding', 'chunked')
 
-    const { fileURLToPath } = await import('node:url')
-    const __filename = fileURLToPath(import.meta.url)
-    const projectRoot = path.resolve(path.dirname(__filename), '..', '..')
-    const venvPath = path.join(projectRoot, 'orchestrator', '.venv')
-    const venvPython = process.platform === 'win32'
-      ? path.join(venvPath, 'Scripts', 'python.exe')
-      : path.join(venvPath, 'bin', 'python')
-    const venvPip = process.platform === 'win32'
-      ? path.join(venvPath, 'Scripts', 'pip.exe')
-      : path.join(venvPath, 'bin', 'pip')
-    const reqFile = path.join(projectRoot, 'orchestrator', 'requirements.txt')
+    const { orchestratorRequirements, orchestratorVenvDir, venvPythonExe, venvPipExe, appSupportDir } =
+      await import('../lib/orchestrator-paths')
+    // La venv NON può stare nel bundle read-only → dir utente scrivibile.
+    const venvPath = orchestratorVenvDir()
+    const venvPython = venvPythonExe(venvPath)
+    const venvPip = venvPipExe(venvPath)
+    // requirements.txt si legge dal bundle/repo (read-only ok).
+    const reqFile = orchestratorRequirements()
+    // Assicura che la dir padre della venv esista prima di `python -m venv`.
+    await fs.mkdir(appSupportDir(), { recursive: true }).catch(() => {})
 
     // Helper streaming
     function writeLine(line: string): void {
@@ -296,7 +295,8 @@ export function systemRouter(): Router {
         writeLine(`  $ ${cmd} ${args.join(' ')}`)
         const proc = spawn(cmd, args, {
           shell: process.platform === 'win32',
-          cwd: projectRoot,
+          // Tutti i path passati sono assoluti; cwd = dir orchestrator (esistente).
+          cwd: path.dirname(reqFile),
         })
         proc.stdout.on('data', (c: Buffer) => writeLine(c.toString('utf-8').trimEnd()))
         proc.stderr.on('data', (c: Buffer) => writeLine(c.toString('utf-8').trimEnd()))

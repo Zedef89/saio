@@ -363,7 +363,9 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     if (appliedModel && appliedModel !== 'default') params.set('model', appliedModel)
     if (appliedPerm && appliedPerm !== 'default') params.set('permissionMode', appliedPerm)
     const qs = params.toString() ? `?${params.toString()}` : ''
-    const wsUrl = `ws://${window.location.hostname}:3031/api/pty/${encodeURIComponent(projectId)}${qs}`
+    // Desktop (tauri://): hostname è "localhost" ma la CSP autorizza solo 127.0.0.1 → forziamo 127.0.0.1
+    const wsHost = window.location.protocol.startsWith('http') ? window.location.hostname : '127.0.0.1'
+    const wsUrl = `ws://${wsHost}:3031/api/pty/${encodeURIComponent(projectId)}${qs}`
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 

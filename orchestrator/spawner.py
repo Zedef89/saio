@@ -11,12 +11,20 @@ Strategia:
 
 import logging
 import os
+import shlex
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Any
 
 log = logging.getLogger(__name__)
+
+
+def _osa_escape(s: str) -> str:
+    """Escape a string for embedding inside an AppleScript double-quoted literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 # Root del repo parent (contiene sia la dashboard che i plugin AgencyOS, se presenti)
@@ -197,16 +205,92 @@ def spawn_project_session(project: Dict[str, Any], data_dir: Path, session_mgr) 
         log.info(f"[{project_id}] cwd={cwd}")
         log.info(f"[{project_id}] kickoff={kickoff_path}")
 
-        CREATE_NEW_CONSOLE = 0x00000010  # Windows constant
-        proc = subprocess.Popen(
-            ["cmd.exe", "/k", cmd_inner],
-            cwd=cwd,
-            shell=False,
-            creationflags=CREATE_NEW_CONSOLE,
-            env=spawn_env,
-        )
+        if sys.platform == "win32":
+            # ───────── Windows: cmd.exe /k in una nuova console ─────────
+            CREATE_NEW_CONSOLE = 0x00000010  # Windows constant
+            proc = subprocess.Popen(
+                ["cmd.exe", "/k", cmd_inner],
+                cwd=cwd,
+                shell=False,
+                creationflags=CREATE_NEW_CONSOLE,
+                env=spawn_env,
+            )
 
-        # Aspetto 500ms per dare tempo al CMD di aprirsi
+        elif sys.platform == "darwin":
+            # ───────── macOS: Terminal.app via osascript ─────────
+            # Costruisco uno script shell (cd + hint + clipboard + comando CLI),
+            # poi lo eseguo in una nuova finestra Terminal con `do script`.
+            lines = [f"cd {shlex.quote(cwd)}", "clear"]
+            if is_remote_spawn:
+                lines += [
+                    f'printf "%s\\n" {shlex.quote(first_message)}',
+                    f'printf "%s\\n" {shlex.quote(f"Target remoto: {spawn_target} ({vps_user}@{vps_ip})")}',
+                    f'printf "%s\\n" {shlex.quote(second_message)}',
+                    ssh_cmd,  # ssh -i ... -t user@ip "cli_cmd"
+                ]
+            else:
+                lines += [
+                    f'printf "%s\\n" {shlex.quote(first_message)}',
+                    f'printf "%s\\n" {shlex.quote(second_message)}',
+                    # clipboard: /read <kickoff> pronto per Cmd+V
+                    f"printf %s {shlex.quote(clipboard_cmd_raw)} | pbcopy",
+                    f'printf "%s\\n" {shlex.quote(third_message)}',
+                    cli_cmd,
+                ]
+            shell_cmd = " ; ".join(lines)
+            osa_do = f'tell application "Terminal" to do script "{_osa_escape(shell_cmd)}"'
+            proc = subprocess.Popen(
+                [
+                    "osascript",
+                    "-e",
+                    osa_do,
+                    "-e",
+                    'tell application "Terminal" to activate',
+                ],
+                env=spawn_env,
+            )
+
+        else:
+            # ───────── Linux (best-effort): emulatore di terminale ─────────
+            lines = [f"cd {shlex.quote(cwd)}", "clear"]
+            if is_remote_spawn:
+                lines += [
+                    f'printf "%s\\n" {shlex.quote(first_message)}',
+                    f'printf "%s\\n" {shlex.quote(f"Target remoto: {spawn_target} ({vps_user}@{vps_ip})")}',
+                    f'printf "%s\\n" {shlex.quote(second_message)}',
+                    ssh_cmd,
+                ]
+            else:
+                lines += [
+                    f'printf "%s\\n" {shlex.quote(first_message)}',
+                    f'printf "%s\\n" {shlex.quote(second_message)}',
+                    f'printf "%s\\n" {shlex.quote(third_message)}',
+                    cli_cmd,
+                ]
+            # Tiene il terminale aperto lanciando una shell interattiva dopo.
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            shell_cmd = " ; ".join(lines) + f" ; exec {shlex.quote(user_shell)}"
+            # Prova i terminali comuni in ordine, col loro flag di esecuzione.
+            term_candidates = [
+                ("gnome-terminal", ["--"]),
+                ("konsole", ["-e"]),
+                ("xfce4-terminal", ["-x"]),
+                ("x-terminal-emulator", ["-e"]),
+                ("xterm", ["-e"]),
+            ]
+            launcher = None
+            for term, flag in term_candidates:
+                if shutil.which(term):
+                    launcher = [term, *flag, "bash", "-lc", shell_cmd]
+                    break
+            if launcher is None:
+                raise RuntimeError(
+                    "Nessun emulatore di terminale trovato "
+                    "(gnome-terminal/konsole/xterm/...). Installane uno."
+                )
+            proc = subprocess.Popen(launcher, cwd=cwd, env=spawn_env)
+
+        # Aspetto 500ms per dare tempo al terminale di aprirsi
         time.sleep(0.5)
 
         session_mgr.register(

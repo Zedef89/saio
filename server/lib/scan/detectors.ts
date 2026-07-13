@@ -42,9 +42,17 @@ async function readJsonSafe<T = unknown>(p: string): Promise<T | null> {
  * Esegue tutti i detector sulla cartella e ritorna le risorse trovate.
  * Una cartella può matchare più tipi (es. node-project + git contemporaneamente).
  */
+// Garantisce un name valido per lo schema import (stringa non vuota, max 200 char).
+// package.json può avere name non-stringa (number/object) o troppo lungo, o il basename
+// può essere vuoto (root) o oltre 200 char su macOS.
+function safeName(candidate: unknown, fallback: string): string {
+  const s = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : fallback
+  return (s || 'unnamed').slice(0, 200)
+}
+
 export async function detectAll(dirPath: string): Promise<Detected[]> {
   const found: Detected[] = []
-  const name = path.basename(dirPath)
+  const name = safeName(path.basename(dirPath), 'unnamed')
 
   // git
   if (await fileExists(path.join(dirPath, '.git'))) {
@@ -64,7 +72,7 @@ export async function detectAll(dirPath: string): Promise<Detected[]> {
       found.push({
         kind: 'node-project',
         path: dirPath,
-        name: pkg.name || name,
+        name: safeName(pkg.name, name),
         meta: {
           description: pkg.description,
           scripts: pkg.scripts ? Object.keys(pkg.scripts) : [],

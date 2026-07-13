@@ -22,7 +22,7 @@ const commands: Array<{ group: string; description?: string; items: QuickCmd[] }
     { icon: Archive, label: 'Archivio', to: '/archive' },
     { icon: BarChart3, label: 'Metriche', to: '/metrics' },
     { icon: Sparkles, label: 'Extras (MCP, Creds, QuickCmds)', to: '/extras' },
-    { icon: Inbox, label: 'Automazioni (Task Scheduler)', to: '/cron' },
+    { icon: Inbox, label: 'Automazioni (launchd)', to: '/cron' },
   ]},
   { group: 'Quick Commands', description: 'Click → copia il comando, poi incollalo nella CLI', items: [
     { icon: Terminal, label: '/obsidian-daily', to: null, run: 'obsidian-daily', description: 'Genera il cockpit mattutino del vault (priorità + progetti + task + reminder)' },

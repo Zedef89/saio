@@ -2,7 +2,7 @@
   "page_title": "Cron",
   "page_subtitle": "Native scheduled tasks via your operating system.",
   "scheduler_label": {
-    "windows": "Windows Task Scheduler",
+    "windows": "launchd (macOS)",
     "linux": "systemd-timer (user)",
     "macos": "launchd (LaunchAgents)"
   },

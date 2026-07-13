@@ -94,6 +94,17 @@ export function onboardingRouter(dataDir: string): Router {
       res.status(400).json({ error: 'path_not_found', message: 'Path non esistente sul filesystem.' })
       return
     }
+    // Impedisci vault = home o root: zippare la home intera tocca cartelle protette
+    // macOS (.Trash, Library) → EPERM, e non è comunque un vault Obsidian valido.
+    const resolvedVault = path.resolve(vaultPath)
+    const homeDir = process.env.HOME || ''
+    if (resolvedVault === path.parse(resolvedVault).root || (homeDir && resolvedVault === path.resolve(homeDir))) {
+      res.status(400).json({
+        error: 'vault_too_broad',
+        message: 'Il vault non può essere la home o la root. Seleziona una sottocartella (es. ~/Obsidian/Vault).',
+      })
+      return
+    }
     try {
       await updateEnvLocal({ VAULT_PATH: vaultPath })
       setProcessEnv({ VAULT_PATH: vaultPath })

@@ -1,11 +1,11 @@
 import { Router } from 'express'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import os from 'node:os'
 import { logger } from '../lib/logger'
 
-const VAULT_PATH =
-  process.env.VAULT_PATH ||
-  'C:\\Users\\info\\.claude\\projects\\C--Users-info-Desktop-CLAUDE-WORLD\\memory'
+// Default cross-platform (niente path hardcoded). Impostare VAULT_PATH nell'env per il vault reale.
+const VAULT_PATH = process.env.VAULT_PATH || path.join(os.homedir(), 'Obsidian')
 
 const IGNORED_DIRS = new Set([
   '.git',

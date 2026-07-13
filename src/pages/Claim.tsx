@@ -26,7 +26,13 @@ export default function ClaimPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const token = (searchParams.get('token') || '').trim()
+  const urlToken = (searchParams.get('token') || '').trim()
+  // SAIO desktop: the packaged app has no address bar to pass ?token=. Fetch it from the
+  // localhost-only backend endpoint, retrying since the backend may take a few seconds to bind.
+  const isDesktop = typeof window !== 'undefined' && !window.location.protocol.startsWith('http')
+  const [fetchedToken, setFetchedToken] = useState('')
+  const [tokenLoading, setTokenLoading] = useState(isDesktop && !urlToken)
+  const token = urlToken || fetchedToken
   const { t } = useTranslation(['auth', 'common'])
   const [email, setEmail] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -49,6 +55,39 @@ export default function ClaimPage() {
     setError(null)
   }, [email])
 
+  // Desktop-only: pull the claim token from the localhost backend (with retry).
+  useEffect(() => {
+    if (urlToken || !isDesktop) {
+      setTokenLoading(false)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      for (let i = 0; i < 15 && !cancelled; i++) {
+        try {
+          const r = await fetch('/api/auth/claim/local-token')
+          if (r.ok) {
+            const data = (await r.json()) as { token?: string }
+            if (data.token && !cancelled) {
+              setFetchedToken(data.token)
+              setTokenLoading(false)
+              return
+            }
+          } else if (r.status === 410) {
+            break // already claimed
+          }
+        } catch {
+          /* backend not ready yet — retry */
+        }
+        await new Promise((res) => setTimeout(res, 1000))
+      }
+      if (!cancelled) setTokenLoading(false)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [urlToken, isDesktop])
+
   const showSetupWarning = useMemo(
     () => setupStatus && !setupStatus.configured && !setupStatus.claimed && skipped,
     [setupStatus, skipped]
@@ -67,6 +106,13 @@ export default function ClaimPage() {
   }
 
   if (!token) {
+    if (tokenLoading) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-background">
+          <div className="text-muted-foreground text-sm">{t('common:actions.loading')}</div>
+        </div>
+      )
+    }
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4 sm:p-6">
         <div className="max-w-md w-full p-5 sm:p-6 border border-border rounded-lg bg-card">

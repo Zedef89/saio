@@ -11,6 +11,8 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import nodemailer from 'nodemailer'
+import { promises as fsp } from 'fs'
+import { authPath as claimAuthPath } from '../lib/auth/constants'
 import {
   bootstrapAuth,
   deleteClaimToken,
@@ -295,6 +297,24 @@ export function authRouter(dataDir: string): Router {
   router.get('/claim/status', async (_req, res) => {
     const claimed = await isClaimed(dataDir)
     res.json({ claimed })
+  })
+
+  // ─────────────────── CLAIM LOCAL TOKEN (desktop app, localhost-only, pre-claim) ───────────────────
+  // SAIO desktop fix: the packaged app has no address bar to pass ?token=. Expose the raw
+  // claim token to the LOCAL webview only (backend already binds 127.0.0.1) and only while
+  // unclaimed. The token is anyway readable from data/auth/CLAIM-TOKEN.txt on this machine.
+  router.get('/claim/local-token', async (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || ''
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'
+    if (!isLocal) { res.status(403).json({ error: 'forbidden' }); return }
+    if (await isClaimed(dataDir)) { res.status(410).json({ error: 'already_claimed' }); return }
+    try {
+      const token = (await fsp.readFile(claimAuthPath(dataDir, 'claimTokenTxt'), 'utf-8')).trim()
+      if (!token) { res.status(404).json({ error: 'no_token' }); return }
+      res.json({ token })
+    } catch {
+      res.status(404).json({ error: 'no_token' })
+    }
   })
 
   // ─────────────────── SETUP STATUS (public, lettura no rate-limit) ───────────────────

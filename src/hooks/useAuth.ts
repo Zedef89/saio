@@ -22,7 +22,12 @@ export function useMe() {
   return useQuery({
     queryKey: AUTH_ME_KEY,
     queryFn: fetchMe,
-    retry: false,
+    // Desktop: the backend sidecar may take a couple seconds to bind on startup, so the
+    // first /api/auth/me can fail with a network error. Retry those, but never retry a real
+    // 401 (unauthenticated) — that must fall through to the login screen immediately.
+    retry: (failureCount, error) =>
+      failureCount < 8 && !(error instanceof Error && error.message === 'unauthenticated'),
+    retryDelay: 1000,
     staleTime: 5 * 60_000,
     gcTime: 5 * 60_000,
   })

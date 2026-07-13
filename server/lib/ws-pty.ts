@@ -8,6 +8,10 @@ const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:3031',
   'http://localhost:3030',
   'http://localhost:3031',
+  // Desktop webview (Tauri) + accesso via tunnel: origini della webview e del dominio pubblico.
+  'tauri://localhost',
+  'http://tauri.localhost',
+  ...(process.env.DASHBOARD_AUTH_TUNNEL_URL ? [process.env.DASHBOARD_AUTH_TUNNEL_URL.replace(/\/$/, '')] : []),
 ])
 
 /**

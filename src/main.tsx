@@ -1,3 +1,4 @@
+import './lib/api-base-fix' // SAIO macOS fix: must run before any request — keep first
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'

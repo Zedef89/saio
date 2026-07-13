@@ -51,7 +51,10 @@
     "resources": [
       "../scripts/register-elevator.ps1",
       "../scripts/elevator-windows.ps1",
-      "binaries/saio-server.cjs"
+      "binaries/saio-server.cjs",
+      "binaries/node_modules/node-pty/**/*",
+      "../orchestrator/**/*",
+      "../dist/**/*"
     ],
     "windows": {
       "nsis": {
@@ -64,7 +67,7 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "frameworks": [],
-      "exceptionDomain": ""
+      "exceptionDomain": "127.0.0.1"
     },
     "linux": {
       "deb": {

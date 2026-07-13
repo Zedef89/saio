@@ -1,14 +1,8 @@
-// V15.0 WS7 — carica .env.local al boot (priorità) + .env (fallback) PRIMA di qualunque
-// import che legga process.env. Senza questo, il wizard scrive .env.local ma al restart
-// il backend non rivede le credenziali → setup-status torna configured:false.
-import dotenv from 'dotenv'
+// DEVE restare il PRIMO import: carica .env.local/.env + PATH + cwd prima di ogni altro
+// modulo, così le const che leggono process.env (es. VAULT_PATH) vedono i valori giusti.
+import './load-env'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-const __dirnameBoot = path.dirname(fileURLToPath(import.meta.url))
-const projectRootBoot = path.resolve(__dirnameBoot, '..')
-dotenv.config({ path: path.join(projectRootBoot, '.env.local') })
-dotenv.config({ path: path.join(projectRootBoot, '.env') })
-
 import express, { type Request, type Response, type NextFunction } from 'express'
 import helmet from 'helmet'
 import fs from 'node:fs'
@@ -67,7 +61,16 @@ import cookieParser from 'cookie-parser'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PROJECT_ROOT = path.resolve(__dirname, '..')
-const DATA_DIR = process.env.DASHBOARD_DATA_DIR || path.join(PROJECT_ROOT, 'data')
+// DATA_DIR: in app bundle macOS le Resources sono read-only e si perdono a ogni reinstallazione.
+// Usiamo una dir utente scrivibile e persistente (claim/owner/config/progetti sopravvivono).
+function resolveDataDir(): string {
+  if (process.env.DASHBOARD_DATA_DIR) return process.env.DASHBOARD_DATA_DIR
+  if (process.platform === 'darwin' && PROJECT_ROOT.includes('.app/Contents')) {
+    return path.join(process.env.HOME || '', 'Library', 'Application Support', 'us.revolutionmarketing.saio', 'data')
+  }
+  return path.join(PROJECT_ROOT, 'data')
+}
+const DATA_DIR = resolveDataDir()
 const PORT = Number(process.env.SERVER_PORT || 3031)
 const HOST = '127.0.0.1'
 
@@ -109,6 +112,12 @@ const ALLOWED_ORIGINS = (process.env.DASHBOARD_ALLOWED_ORIGINS || 'http://127.0.
 // V15.0 WS3-3D — Tunnel URL (Cloudflare/Reverse-proxy) per CORS allowlist + magic-link absolute URL
 const TUNNEL_URL = (process.env.DASHBOARD_AUTH_TUNNEL_URL || '').trim()
 if (TUNNEL_URL && !ALLOWED_ORIGINS.includes(TUNNEL_URL)) ALLOWED_ORIGINS.push(TUNNEL_URL)
+
+// SAIO desktop (Tauri) webview origins — required so the packaged app (macOS: tauri://localhost,
+// Windows/Linux: http://tauri.localhost) passes the CORS allowlist when calling the local API.
+for (const o of ['tauri://localhost', 'http://tauri.localhost']) {
+  if (!ALLOWED_ORIGINS.includes(o)) ALLOWED_ORIGINS.push(o)
+}
 
 // V15.0 WS3-3D — Trust proxy SOLO da localhost (cloudflared gira sulla stessa VPS e
 // inoltra a 127.0.0.1, settando X-Forwarded-For + CF-Connecting-IP). Senza questo,
@@ -245,6 +254,26 @@ app.use('/api/scan', scanRouter(DATA_DIR))
 const docsPath = path.join(PROJECT_ROOT, 'docs')
 if (fs.existsSync(docsPath)) {
   app.use('/docs', express.static(docsPath, { fallthrough: true, maxAge: '1d' }))
+}
+
+// Opzionale (SAIO_SERVE_STATIC): serve il frontend buildato (dist/) dallo stesso origin
+// del backend. Abilita test E2E via browser su http://127.0.0.1:3031 e il flusso magic-link
+// web same-origin. Non attivo di default (in app desktop il frontend è embedded in Tauri).
+// Auto-detect del frontend buildato: env esplicita, oppure dist bundlato (Resources/_up_/dist),
+// oppure dist dev. Necessario per l'accesso via tunnel browser (same-origin, il magic-link web).
+const staticDir =
+  process.env.SAIO_SERVE_STATIC ||
+  [path.join(PROJECT_ROOT, '_up_', 'dist'), path.join(PROJECT_ROOT, 'dist')].find((d) => fs.existsSync(d)) ||
+  ''
+if (staticDir && fs.existsSync(staticDir)) {
+  app.use(express.static(staticDir, { index: false }))
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method !== 'GET') return next()
+    if (req.path.startsWith('/api/') || req.path.startsWith('/docs/')) return next()
+    if (req.path.includes('.')) return next() // asset (js/css/png) già gestiti da express.static
+    res.sendFile(path.join(staticDir, 'index.html'))
+  })
+  logger.info(`🖼️  Serving frontend (SAIO_SERVE_STATIC) from ${staticDir}`)
 }
 
 // ============================================================

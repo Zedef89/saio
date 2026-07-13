@@ -104,7 +104,9 @@ export function AccountLoginDialog({ open, onClose, accountId, accountLabel, cli
         params.set('vpsId', target!)
         params.set('cliName', cliName)
       }
-      const wsUrl = `ws://${window.location.hostname}:3031/api/pty/${encodeURIComponent(loginProjectId)}?${params.toString()}`
+      // Desktop (tauri://): hostname è "localhost" ma la CSP autorizza solo 127.0.0.1 → forziamo 127.0.0.1
+      const wsHost = window.location.protocol.startsWith('http') ? window.location.hostname : '127.0.0.1'
+      const wsUrl = `ws://${wsHost}:3031/api/pty/${encodeURIComponent(loginProjectId)}?${params.toString()}`
       console.log('[AccountLoginDialog] WS connect:', wsUrl, { target })
 
       try {

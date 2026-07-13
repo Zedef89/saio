@@ -10,6 +10,7 @@ import { z } from 'zod'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
+import crypto from 'node:crypto'
 import { atomicWriteFile } from '../lib/atomic-write'
 import { defaultRootPaths, scanFilesystem } from '../lib/scan/filesystem-scanner'
 import type { Detected } from '../lib/scan/detectors'
@@ -21,17 +22,15 @@ const ScanStartBody = z.object({
   targetNames: z.array(z.string().min(1).max(200)).max(50).optional(),
 })
 
+const ImportItem = z.object({
+  path: z.string().min(1).max(2048),
+  kind: z.string().min(1),
+  name: z.string().min(1).max(200),
+})
+// Body permissivo: validiamo per-item nell'handler così un singolo item invalido
+// (es. name non-stringa, path URL github, path fuori home) non fa fallire l'intero import.
 const ImportBody = z.object({
-  items: z
-    .array(
-      z.object({
-        path: z.string().min(1).max(2048),
-        kind: z.string().min(1),
-        name: z.string().min(1).max(200),
-      })
-    )
-    .min(1)
-    .max(200),
+  items: z.array(z.unknown()).min(1).max(200),
 })
 
 export function scanRouter(dataDir: string): Router {
@@ -134,14 +133,30 @@ export function scanRouter(dataDir: string): Router {
       res.status(400).json({ error: 'invalid_body' })
       return
     }
-    // Sicurezza: tutti i path devono essere dentro home
+    // Validazione per-item robusta: raccogliamo i validi e teniamo traccia degli skippati
+    // (un item invalido non deve far fallire l'intero import).
     const home = os.homedir()
-    for (const item of parsed.data.items) {
-      const abs = path.resolve(item.path)
-      if (!abs.startsWith(home)) {
-        res.status(400).json({ error: 'path_outside_home', path: item.path })
-        return
+    const validItems: Array<z.infer<typeof ImportItem>> = []
+    const skippedItems: Array<{ path?: string; reason: string }> = []
+    for (const raw of parsed.data.items) {
+      const r = ImportItem.safeParse(raw)
+      if (!r.success) {
+        const p = (raw as { path?: unknown })?.path
+        skippedItems.push({ path: typeof p === 'string' ? p : undefined, reason: 'invalid_fields' })
+        continue
       }
+      const item = r.data
+      // Path non-filesystem (es. URL github-repo) → non importabile come progetto locale
+      if (/^[a-z]+:\/\//i.test(item.path)) {
+        skippedItems.push({ path: item.path, reason: 'not_a_filesystem_path' })
+        continue
+      }
+      const abs = path.resolve(item.path)
+      if (abs !== home && !abs.startsWith(home + path.sep)) {
+        skippedItems.push({ path: item.path, reason: 'path_outside_home' })
+        continue
+      }
+      validItems.push(item)
     }
     // Append a data/projects.json esistente (non sovrascrive — merge by path)
     const projectsFile = path.join(dataDir, 'projects.json')
@@ -161,9 +176,11 @@ export function scanRouter(dataDir: string): Router {
     const existingPaths = new Set((existing.projects || []).map((p) => p.path))
     let added = 0
     const importedAt = new Date().toISOString()
-    for (const item of parsed.data.items) {
+    for (const item of validItems) {
       if (existingPaths.has(item.path)) continue
-      const id = `import-${Buffer.from(item.path).toString('base64url').slice(0, 16)}-${Date.now()}`
+      // id univoco e deterministico per path (hash completo, non solo i primi 16 char
+      // del base64 che collidono per path con prefisso comune come /Users/<u>/dev/*).
+      const id = `proj-${crypto.createHash('sha1').update(item.path).digest('hex').slice(0, 12)}`
       ;(existing.projects = existing.projects || []).push({
         id,
         path: item.path,
@@ -175,7 +192,7 @@ export function scanRouter(dataDir: string): Router {
     }
     await fs.mkdir(path.dirname(projectsFile), { recursive: true })
     await atomicWriteFile(projectsFile, JSON.stringify(existing, null, 2))
-    res.json({ ok: true, added, total: (existing.projects || []).length })
+    res.json({ ok: true, added, total: (existing.projects || []).length, skipped: skippedItems })
   })
 
   return router

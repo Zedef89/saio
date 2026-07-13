@@ -13,14 +13,9 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { logger } from './logger'
 import { resolvePythonExe, checkPythonDeps, isPidAlive } from './python-deps-check'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
-const ORCHESTRATOR_SCRIPT = path.join(PROJECT_ROOT, 'orchestrator', 'orchestrator.py')
+import { orchestratorScript } from './orchestrator-paths'
 
 const REQUIRED_PYTHON_DEPS =
   process.platform === 'win32' ? ['psutil', 'watchdog', 'pywinpty'] : ['psutil', 'watchdog']
@@ -82,7 +77,7 @@ export async function triggerOrchestrator(params: TriggerParams): Promise<Trigge
     child = spawn(
       pyExe,
       [
-        ORCHESTRATOR_SCRIPT,
+        orchestratorScript('orchestrator.py'),
         '--response',
         params.responsePath,
         '--brief',

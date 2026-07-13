@@ -38,6 +38,21 @@ export interface ScheduledTask {
   /** Se true: comando è path file PS1/sh, altrimenti string-command. */
   commandIsFile?: boolean
   schedule: ScheduleSpec
+  /**
+   * Label schedule già leggibile (es. "ogni 10 min", "Daily 07:30").
+   * Usato quando ScheduleSpec non basta a rappresentare l'intervallo
+   * (StartInterval launchd, espressioni cron `*​/N`). Opzionale: se assente,
+   * il consumer deriva la label da `schedule`.
+   */
+  scheduleLabel?: string
+  /**
+   * Fonte del task (macOS): 'saio' = LaunchAgent gestito da SAIO,
+   * 'launchd' = LaunchAgent utente esterno, 'cron' = riga crontab utente.
+   * Default (Windows/Linux e retrocompat): trattato come 'saio'.
+   */
+  source?: 'saio' | 'launchd' | 'cron'
+  /** true se il task è gestibile dalla dashboard (list/run/enable/disable/delete). */
+  managed?: boolean
   /** Stato corrente. */
   state: TaskState
   /** Descrizione breve (max 1024 char). Persistita in commento nativo (Windows: schtasks /comment, Linux: # comment, macOS: <key>Description</key>). */

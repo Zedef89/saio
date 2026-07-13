@@ -5,16 +5,12 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
+import { orchestratorDir, orchestratorVenvDir, venvPythonExe } from './orchestrator-paths'
 
 /**
- * Risolve l'eseguibile Python preferendo venv `orchestrator/.venv/Scripts/python.exe`
- * (Win) o `bin/python` (POSIX) se esistente, fallback a `process.env.PYTHON_EXE` o
- * 'python' di sistema.
+ * Risolve l'eseguibile Python preferendo la venv utente scrivibile
+ * (`orchestratorVenvDir()`), poi eventuale venv repo-relative in dev, fallback a
+ * `process.env.PYTHON_EXE` o python3/python di sistema.
  *
  * NOTA: usato da orchestrator-client.ts per spawn detached (preferenza venv).
  * Per il deps-check usa `findWorkingPython()` (più robusto, prova candidati multipli).
@@ -31,10 +27,13 @@ export async function resolvePythonExe(): Promise<string> {
  */
 export async function resolvePythonCandidates(): Promise<string[]> {
   const candidates: string[] = []
-  // Priorità 1: venv (cross-platform)
-  const venvWin = path.join(PROJECT_ROOT, 'orchestrator', '.venv', 'Scripts', 'python.exe')
-  const venvPosix = path.join(PROJECT_ROOT, 'orchestrator', '.venv', 'bin', 'python')
-  for (const v of [venvWin, venvPosix]) {
+  // Priorità 1: venv utente scrivibile (nuova, cross-platform) → poi venv
+  // repo-relative (dev legacy: orchestrator/.venv accanto ai .py).
+  const userVenvPy = venvPythonExe(orchestratorVenvDir())
+  const orchDir = orchestratorDir()
+  const repoVenvWin = path.join(orchDir, '.venv', 'Scripts', 'python.exe')
+  const repoVenvPosix = path.join(orchDir, '.venv', 'bin', 'python')
+  for (const v of [userVenvPy, repoVenvWin, repoVenvPosix]) {
     try {
       await fs.access(v)
       candidates.push(v)

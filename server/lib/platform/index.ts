@@ -14,11 +14,14 @@
 // lazy-loaded platform-specific modules can use sync require() to avoid
 // turning getPlatform() into an async function (it's called from many
 // non-async callsites).
-import { createRequire } from 'node:module'
 import os from 'node:os'
 import type { IPlatform, Platform } from './types'
-
-const require = createRequire(import.meta.url)
+// Import STATICI: il sidecar è un bundle esbuild single-file, quindi i require dinamici
+// (require('./macos')) NON venivano inclusi → MODULE_NOT_FOUND a runtime (rompeva il PTY).
+// Le classi platform non hanno side-effect all'import; si istanzia solo quella corrente.
+import { WindowsPlatform } from './windows'
+import { LinuxPlatform } from './linux'
+import { MacOSPlatform } from './macos'
 
 let _instance: IPlatform | null = null
 
@@ -26,21 +29,15 @@ export function getPlatform(): IPlatform {
   if (_instance) return _instance
   const p = os.platform() as Platform
   switch (p) {
-    case 'win32': {
-      const { WindowsPlatform } = require('./windows') as typeof import('./windows')
+    case 'win32':
       _instance = new WindowsPlatform()
       break
-    }
-    case 'linux': {
-      const { LinuxPlatform } = require('./linux') as typeof import('./linux')
+    case 'linux':
       _instance = new LinuxPlatform()
       break
-    }
-    case 'darwin': {
-      const { MacOSPlatform } = require('./macos') as typeof import('./macos')
+    case 'darwin':
       _instance = new MacOSPlatform()
       break
-    }
     default:
       throw new Error(`Platform non supportata: ${p}. Supportati: win32, linux, darwin.`)
   }

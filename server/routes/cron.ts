@@ -1,17 +1,17 @@
 import { Router } from 'express'
-import { exec, execFile } from 'node:child_process'
+import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { logger } from '../lib/logger'
-import { isElevatorAvailable, runViaElevator, invalidateElevatorCache } from '../lib/elevator'
+import { getPlatform } from '../lib/platform'
+import type { ScheduleSpec } from '../lib/platform'
 import { getAllCronMeta, setCronMeta, deleteCronMeta as deleteCronMetaSidecar, renameCronMeta } from '../lib/cronMeta'
 import { listNotifications, archiveStale } from '../lib/notifications-store'
 import { approveNotification, dismissNotification } from '../lib/auto-fix-dispatcher'
 
 const execAsync = promisify(exec)
-const execFileAsync = promisify(execFile)
 
 interface CronTask {
   name: string
@@ -26,6 +26,9 @@ interface CronTask {
   // V14.28 — auto-fix toggle (solo per cron error-handling capable)
   errorHandlingCapable?: boolean
   autoFix?: boolean | null
+  // Automazioni utente (macOS): fonte + gestibilità.
+  source?: 'saio' | 'launchd' | 'cron'
+  managed?: boolean
 }
 
 /**
@@ -37,6 +40,21 @@ const ERROR_HANDLING_CRONS = new Set([
   'Obsidian-VPS-Errors-Daily',
   'Obsidian-Extract-Errors-Daily', // già esistente, ora con toggle disponibile
 ])
+
+// V15.9 WS39 — task interni di sistema dashboard (nascosti dalla UI list).
+const INTERNAL_TASKS = new Set(['RM-Saio-Tauri-Elevator', 'RM-Dashboard-Cron-Manager'])
+
+// Prefissi vendor mai gestibili via API (allineato a MacOSTaskScheduler.VENDOR_PREFIXES).
+const VENDOR_PREFIXES = [
+  'com.apple.',
+  'com.google.',
+  'homebrew.mxcl.',
+  'com.docker.',
+  'com.microsoft.',
+  'com.adobe.',
+  'com.macpaw.',
+  'com.lwouis.',
+]
 
 // Known Obsidian automation descriptions
 // V14.23 — aggiunto field `details` per descrizione espandibile in UI
@@ -131,79 +149,41 @@ const KNOWN_DESCRIPTIONS: Record<string, { desc: string; schedule: string; detai
   },
 }
 
+/**
+ * V15.9 WS39 — Lista task via Platform Abstraction Layer.
+ * Su Windows → schtasks (WindowsTaskScheduler), macOS → launchd (MacOSTaskScheduler),
+ * Linux → systemd-timer. La UI riceve la stessa shape `CronTask[]` su ogni OS.
+ */
 async function listTasks(): Promise<CronTask[]> {
   try {
-    const { stdout } = await execAsync('schtasks /query /fo CSV /v', {
-      maxBuffer: 20 * 1024 * 1024,
-      encoding: 'utf-8',
-    })
-    const lines = stdout.split(/\r?\n/).filter(Boolean)
-    if (lines.length < 2) return []
-
-    // Parse CSV header
-    const header = parseCsvLine(lines[0])
-    const nameIdx = header.findIndex((h) => h.includes('TaskName') || h.includes('Nome attivit'))
-    const nextIdx = header.findIndex((h) => h.includes('Next Run') || h.includes('Prossima esec'))
-    const lastIdx = header.findIndex((h) => h.includes('Last Run') || h.includes('Ultima esec'))
-    // V14.25 — match esatto su "Status" / "Stato" per il field runtime (col 4),
-    // evitando di matchare "Stato attività pianificata" (col 12) che è il field
-    // veramente affidabile per enabled/disabled.
-    const statusIdx = header.findIndex((h) => h === 'Status' || h === 'Stato')
-    const scheduledStateIdx = header.findIndex(
-      (h) => h.includes('Scheduled Task State') || h.toLowerCase().includes('attività pianificat')
-    )
-    const resultIdx = header.findIndex((h) => h.includes('Last Result') || h.includes('Ultimo risultato'))
-    // V14.27 — Comment field nativo schtasks (col 10): description short-form.
-    // Match esatto per evitare conflitto con altri header che contengono "Comment".
-    const commentIdx = header.findIndex((h) => h === 'Comment' || h === 'Commento')
-    // V14.27 — campi per derivare schedule fallback se non in sidecar
-    const scheduleTypeIdx = header.findIndex(
-      (h) => h.includes('Schedule Type') || h.toLowerCase().includes('tipo di pianificazione')
-    )
-    const startTimeIdx = header.findIndex(
-      (h) => h.includes('Start Time') || h.toLowerCase().includes('ora di avvio')
-    )
-
-    // V14.27 — task interni di sistema dashboard (nascosti dalla UI list).
-    // Restano accessibili solo via endpoint dedicati (es. /elevator/status).
-    const INTERNAL_TASKS = new Set(['RM-Saio-Tauri-Elevator'])
-
-    // V14.27 — load sidecar metadata (long-form details + custom schedule labels)
+    const palTasks = await getPlatform().taskScheduler.list()
+    // Load sidecar metadata (long-form details + custom schedule labels)
     const allMeta = await getAllCronMeta()
 
     const tasks: CronTask[] = []
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCsvLine(lines[i])
-      if (row.length < 3) continue
-      const fullName = row[nameIdx] || ''
-      const name = fullName.replace(/^\\/, '')
-      if (!name.toLowerCase().includes('obsidian') && !name.toLowerCase().includes('claude') && !name.toLowerCase().includes('rm-dashboard')) continue
-      if (INTERNAL_TASKS.has(name)) continue // V14.27 — nasconde Cron-Manager dalla UI
+    for (const t of palTasks) {
+      const name = t.name
+      const lname = name.toLowerCase()
+      // Fonte del task. Windows/Linux non popolano `source` → trattato come 'saio'.
+      const source = t.source ?? 'saio'
+      // I task SAIO/dashboard restano filtrati per naming pattern; le automazioni
+      // utente esterne (launchd/cron) sono gestibili e vanno sempre mostrate.
+      if (source === 'saio') {
+        if (!lname.includes('obsidian') && !lname.includes('claude') && !lname.includes('rm-dashboard')) continue
+        if (INTERNAL_TASKS.has(name)) continue
+      }
 
-      // V14.27 — FALLBACK ONLY: usato solo se Comment field e cron-meta.json sidecar
-      // entrambi vuoti (es. task creato manualmente fuori dalla dashboard senza commento).
+      // FALLBACK: usato solo se description nativa e cron-meta.json sidecar entrambi vuoti.
       const known = KNOWN_DESCRIPTIONS[name]
-
-      const status = row[statusIdx] || 'unknown'
-      const scheduledState = scheduledStateIdx >= 0 ? row[scheduledStateIdx] || '' : ''
-      const enabled =
-        scheduledStateIdx >= 0
-          ? !/disabil|disabled/i.test(scheduledState)
-          : !/disabil|disabled/i.test(status)
-
-      // V14.27 — sources priority: Comment field (sistema) > sidecar (custom) > KNOWN fallback
-      const commentRaw = (commentIdx >= 0 ? (row[commentIdx] || '').trim() : '')
       const meta = allMeta[name] || {}
-      const description =
-        commentRaw ||
-        known?.desc ||
-        `Automazione cron: ${name}`
+
+      const enabled = t.state !== 'disabled'
+      // sources priority: description nativa (Comment/SaioDescription) > KNOWN fallback
+      const nativeDesc = (t.description || '').trim()
+      const description = nativeDesc || known?.desc || `Automazione cron: ${name}`
       const details = meta.details || known?.details
-      // Schedule label: sidecar > KNOWN > inferred from CSV
-      const schedule =
-        meta.schedule ||
-        known?.schedule ||
-        inferSchedule(scheduleTypeIdx >= 0 ? row[scheduleTypeIdx] : '', startTimeIdx >= 0 ? row[startTimeIdx] : '')
+      // Schedule label: sidecar > KNOWN > label pre-derivata dal PAL > derivato dallo ScheduleSpec
+      const schedule = meta.schedule || known?.schedule || t.scheduleLabel || scheduleLabel(t.schedule)
 
       // V14.28 — auto-fix capability + state per cron error-handling
       const errorHandlingCapable = ERROR_HANDLING_CRONS.has(name)
@@ -211,16 +191,18 @@ async function listTasks(): Promise<CronTask[]> {
 
       tasks.push({
         name,
-        next: row[nextIdx] || null,
-        last: row[lastIdx] || null,
-        status,
+        next: t.nextRunAt || null,
+        last: t.lastRunAt || null,
+        status: t.state,
         enabled,
         description,
         details,
         schedule,
-        lastResult: row[resultIdx] || undefined,
+        lastResult: t.lastResult != null ? String(t.lastResult) : undefined,
         errorHandlingCapable,
         autoFix,
+        source,
+        managed: t.managed ?? true,
       })
     }
     // Unique per name
@@ -235,75 +217,28 @@ async function listTasks(): Promise<CronTask[]> {
   }
 }
 
-/**
- * V14.27 — Derive schedule label leggibile dai campi CSV "Tipo di pianificazione"
- * e "Ora di avvio" quando sidecar/KNOWN mancano.
- */
-function inferSchedule(type: string, time: string): string | undefined {
-  const t = (type || '').trim().toLowerCase()
-  const ts = (time || '').trim()
-  if (!t) return undefined
-  if (t.includes('giorno') || t.includes('daily')) return ts ? `Daily ${ts}` : 'Daily'
-  if (t.includes('settiman') || t.includes('weekly')) return ts ? `Weekly ${ts}` : 'Weekly'
-  if (t.includes('mens') || t.includes('monthly')) return ts ? `Monthly ${ts}` : 'Monthly'
-  if (t.includes('once') || t.includes('una volta')) return ts ? `Once ${ts}` : 'Once'
-  return type
-}
-
-function parseCsvLine(line: string): string[] {
-  const result: string[] = []
-  let cur = ''
-  let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]
-    if (c === '"' && line[i + 1] === '"') {
-      cur += '"'
-      i++
-    } else if (c === '"') {
-      inQuotes = !inQuotes
-    } else if (c === ',' && !inQuotes) {
-      result.push(cur)
-      cur = ''
-    } else {
-      cur += c
-    }
+/** Deriva una label leggibile ("Daily 09:00") da uno ScheduleSpec del PAL. */
+function scheduleLabel(spec: ScheduleSpec | undefined): string | undefined {
+  if (!spec) return undefined
+  const time = spec.time || ''
+  switch (spec.type) {
+    case 'DAILY':
+      return time ? `Daily ${time}` : 'Daily'
+    case 'WEEKLY':
+      return `Weekly ${spec.day || 'MON'}${time ? ` ${time}` : ''}`
+    case 'MONTHLY':
+      return `Monthly day-${spec.dayOfMonth || '1'}${time ? ` ${time}` : ''}`
+    case 'ONCE':
+      return time ? `Once ${time}` : 'Once'
+    default:
+      return undefined
   }
-  result.push(cur)
-  return result
-}
-
-/**
- * V14.24 — Esegue schtasks in modalità elevated (admin) tramite UAC popup.
- * Wraps `Start-Process schtasks -ArgumentList @(...) -Verb RunAs -Wait -PassThru`.
- * UAC popup appare all'utente; se accetta, il comando esegue. Se rifiuta o c'è
- * errore, lancia eccezione.
- *
- * NOTA: stdout/stderr di schtasks NON sono catturabili in -Verb RunAs perché la
- * nuova finestra è isolata. Catturo solo l'exit code via -PassThru + ExitCode.
- *
- * V14.26 — fix critico: gli args venivano passati come UNA stringa singola
- * `"/change /tn X /disable"`, ma con quoting nidificato cmd→powershell→schtasks
- * il param veniva visto da schtasks come argomento unico malformato → exit 0
- * silente, task NON modificato. Fix: spawn diretto powershell.exe via execFile
- * con args array (no shell quoting) + `-ArgumentList @('/change','/tn','...')`
- * (PowerShell array literal, ogni token separato per schtasks).
- */
-async function runElevatedSchtasks(args: string): Promise<void> {
-  // Tokenizza args (es. "/change /tn TaskName /disable" -> ['/change','/tn','TaskName','/disable'])
-  const tokens = args.split(/\s+/).filter(Boolean)
-  // Costruisci array literal PowerShell con single-quote escape
-  const psArrayLiteral = tokens.map((t) => `'${t.replace(/'/g, "''")}'`).join(',')
-  const psCmd = `$p = Start-Process -FilePath schtasks.exe -ArgumentList @(${psArrayLiteral}) -Verb RunAs -Wait -PassThru -WindowStyle Hidden; if ($null -eq $p) { exit 1 }; if ($p.ExitCode -ne 0) { exit $p.ExitCode }`
-  // execFile evita shell quoting: ogni arg viene passato letterale a powershell.exe
-  await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', psCmd],
-    { encoding: 'utf-8', timeout: 60_000 }
-  )
 }
 
 export function cronRouter() {
   const router = Router()
+
+  const scheduler = () => getPlatform().taskScheduler
 
   router.get('/', async (_req, res) => {
     const tasks = await listTasks()
@@ -323,12 +258,14 @@ export function cronRouter() {
         'logs'
       )
       const dashboardLogsDir = path.join(process.cwd(), 'data', 'logs')
+      // V15.9 — su macOS launchd redirige stdout/stderr qui (StandardOutPath).
+      const macosLogsDir = path.join(os.homedir(), 'Library', 'Logs', 'saio')
 
       const health = await Promise.all(
         tasks.map(async (task) => {
           // Prefix matching: Obsidian-Daily-Cockpit -> "obsidian-daily*"
           const prefix = task.name.toLowerCase().replace(/^(obsidian|rm-dashboard)-/, '').slice(0, 25)
-          const logDirs = [vaultLogsDir, dashboardLogsDir]
+          const logDirs = [vaultLogsDir, dashboardLogsDir, macosLogsDir]
           let latestLog: { path: string; mtime: Date; preview: string } | null = null
 
           for (const dir of logDirs) {
@@ -401,6 +338,15 @@ export function cronRouter() {
   })
 
   function validateTaskName(name: string): string | null {
+    // Cron utente: id sintetico `cron-<hash8>`.
+    if (/^cron-[a-f0-9]{8}$/.test(name)) return null
+    // LaunchAgent utente esterno: label FQDN-like (contiene punti). Vietati i vendor.
+    if (name.includes('.')) {
+      if (!/^[a-zA-Z0-9._-]+$/.test(name)) return 'invalid task name'
+      if (VENDOR_PREFIXES.some((p) => name.startsWith(p))) return 'task not allowed'
+      return null
+    }
+    // Task SAIO/dashboard: naming pattern classico.
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) return 'invalid task name'
     if (
       !name.toLowerCase().includes('obsidian') &&
@@ -412,26 +358,11 @@ export function cronRouter() {
     return null
   }
 
-  // V14.23 — riconosce errore "Accesso negato" / "Access is denied" che Windows
-  // ritorna su schtasks /change|/create senza privilegi admin.
-  function isAdminRequiredError(err: any): boolean {
-    const msg = String(err?.message || err || '').toLowerCase()
-    return msg.includes('accesso negato') || msg.includes('access is denied')
-  }
-
-  // V14.27 — pre-check per rename/delete: blocca op su task in running.
-  // Status runtime (col 4 CSV) = "In esecuzione" / "Running".
+  // V15.9 — pre-check per rename/delete: blocca op su task in running. Delega al PAL.
   async function isTaskRunning(name: string): Promise<boolean> {
     try {
-      const { stdout } = await execAsync(`schtasks /query /tn "${name}" /fo CSV /v`, { encoding: 'utf-8' })
-      const lines = stdout.split(/\r?\n/).filter(Boolean)
-      if (lines.length < 2) return false
-      const header = parseCsvLine(lines[0])
-      const statusIdx = header.findIndex((h) => h === 'Status' || h === 'Stato')
-      if (statusIdx < 0) return false
-      const row = parseCsvLine(lines[1])
-      const status = (row[statusIdx] || '').trim().toLowerCase()
-      return status === 'running' || status === 'in esecuzione'
+      const t = await scheduler().get(name)
+      return t?.state === 'running'
     } catch {
       return false
     }
@@ -442,26 +373,9 @@ export function cronRouter() {
     const err = validateTaskName(name)
     if (err) return res.status(err === 'invalid task name' ? 400 : 403).json({ error: err })
 
-    // V14.27 — try elevator first
-    if (await isElevatorAvailable()) {
-      const r = await runViaElevator({ op: 'run', taskName: name })
-      if (r.ok) return res.json({ ok: true, stdout: r.output || '', viaElevator: true })
-      logger.warn(`elevator run failed for ${name}, falling back: ${r.error}`)
-    }
-
-    try {
-      const { stdout, stderr } = await execAsync(`schtasks /run /tn "${name}"`, { encoding: 'utf-8' })
-      res.json({ ok: true, stdout: stdout.trim(), stderr: stderr.trim() })
-    } catch (err: any) {
-      if (isAdminRequiredError(err)) {
-        return res.status(403).json({
-          error: 'Operazione richiede privilegi admin Windows',
-          errorCode: 'admin_required',
-          hint: 'Riavvia la dashboard come Administrator oppure usa Task Scheduler GUI',
-        })
-      }
-      res.status(500).json({ error: err.message })
-    }
+    const r = await scheduler().run(name)
+    if (r.ok) return res.json({ ok: true, stdout: (r.output || '').trim(), stderr: '' })
+    res.status(500).json({ error: r.error || 'run failed' })
   })
 
   // V14.28 — PATCH auto-fix toggle: ON/OFF per cron error-handling
@@ -524,10 +438,23 @@ export function cronRouter() {
     }
   })
 
-  // V14.27 — endpoint per check stato Elevator (UI mostra warning "setup richiesto" se assente)
+  // V15.9 — Stato elevator/privilegi. Solo Windows richiede l'elevator (zero-UAC);
+  // su macOS/Linux le automazioni sono user-level (LaunchAgents / systemd --user),
+  // nessun admin necessario → available:true, nessun setup.
   router.get('/elevator/status', async (_req, res) => {
-    invalidateElevatorCache()
-    const available = await isElevatorAvailable()
+    const plat = getPlatform().platform
+    if (plat !== 'win32') {
+      return res.json({
+        available: true,
+        taskName: null,
+        setupCommand: null,
+        hint:
+          plat === 'darwin'
+            ? 'macOS: automazioni via LaunchAgents user-level, nessun admin/elevator richiesto.'
+            : 'Automazioni user-level, nessun admin/elevator richiesto.',
+      })
+    }
+    const available = await getPlatform().elevator.isAvailable()
     res.json({
       available,
       taskName: 'RM-Saio-Tauri-Elevator',
@@ -543,33 +470,9 @@ export function cronRouter() {
     const err = validateTaskName(name)
     if (err) return res.status(err === 'invalid task name' ? 400 : 403).json({ error: err })
 
-    // V14.27 — try elevator first (zero UAC)
-    if (await isElevatorAvailable()) {
-      const r = await runViaElevator({ op: 'enable', taskName: name })
-      if (r.ok) return res.json({ ok: true, enabled: true, viaElevator: true })
-      logger.warn(`elevator enable failed for ${name}, falling back: ${r.error}`)
-    }
-
-    try {
-      await execAsync(`schtasks /change /tn "${name}" /enable`, { encoding: 'utf-8' })
-      res.json({ ok: true, enabled: true, elevated: false })
-    } catch (err: any) {
-      if (isAdminRequiredError(err)) {
-        // V14.24 — auto-elevation via UAC popup (fallback)
-        try {
-          await runElevatedSchtasks(`/change /tn ${name} /enable`)
-          return res.json({ ok: true, enabled: true, elevated: true })
-        } catch (elevErr: any) {
-          return res.status(403).json({
-            error: 'Abilitazione fallita anche con UAC',
-            errorCode: 'admin_denied',
-            hint: 'Hai cliccato No al popup UAC, oppure UAC è disabilitato. Usa Task Scheduler GUI.',
-            detail: String(elevErr?.message || elevErr).slice(0, 300),
-          })
-        }
-      }
-      res.status(500).json({ error: err.message })
-    }
+    const r = await scheduler().enable(name)
+    if (r.ok) return res.json({ ok: true, enabled: true })
+    res.status(500).json({ error: r.error || 'enable failed' })
   })
 
   router.post('/:name/disable', async (req, res) => {
@@ -577,36 +480,12 @@ export function cronRouter() {
     const err = validateTaskName(name)
     if (err) return res.status(err === 'invalid task name' ? 400 : 403).json({ error: err })
 
-    // V14.27 — try elevator first (zero UAC)
-    if (await isElevatorAvailable()) {
-      const r = await runViaElevator({ op: 'disable', taskName: name })
-      if (r.ok) return res.json({ ok: true, enabled: false, viaElevator: true })
-      logger.warn(`elevator disable failed for ${name}, falling back: ${r.error}`)
-    }
-
-    try {
-      await execAsync(`schtasks /change /tn "${name}" /disable`, { encoding: 'utf-8' })
-      res.json({ ok: true, enabled: false, elevated: false })
-    } catch (err: any) {
-      if (isAdminRequiredError(err)) {
-        // V14.24 — auto-elevation via UAC popup (fallback)
-        try {
-          await runElevatedSchtasks(`/change /tn ${name} /disable`)
-          return res.json({ ok: true, enabled: false, elevated: true })
-        } catch (elevErr: any) {
-          return res.status(403).json({
-            error: 'Disabilitazione fallita anche con UAC',
-            errorCode: 'admin_denied',
-            hint: 'Hai cliccato No al popup UAC, oppure UAC è disabilitato. Usa Task Scheduler GUI.',
-            detail: String(elevErr?.message || elevErr).slice(0, 300),
-          })
-        }
-      }
-      res.status(500).json({ error: err.message })
-    }
+    const r = await scheduler().disable(name)
+    if (r.ok) return res.json({ ok: true, enabled: false })
+    res.status(500).json({ error: r.error || 'disable failed' })
   })
 
-  // V14.27 — DELETE task scheduled (richiede admin in Windows)
+  // V14.27 — DELETE task scheduled
   router.delete('/:name', async (req, res) => {
     const name = String(req.params.name)
     const err = validateTaskName(name)
@@ -620,39 +499,15 @@ export function cronRouter() {
       })
     }
 
-    // Try elevator first
-    if (await isElevatorAvailable()) {
-      const r = await runViaElevator({ op: 'delete', taskName: name })
-      if (r.ok) {
-        await deleteCronMetaSidecar(name).catch(() => {}) // V14.27 — cleanup sidecar
-        return res.json({ ok: true, viaElevator: true })
-      }
-      logger.warn(`elevator delete failed for ${name}: ${r.error}`)
+    const r = await scheduler().delete(name)
+    if (r.ok) {
+      await deleteCronMetaSidecar(name).catch(() => {}) // cleanup sidecar
+      return res.json({ ok: true })
     }
-
-    try {
-      await execAsync(`schtasks /delete /tn "${name}" /f`, { encoding: 'utf-8' })
-      await deleteCronMetaSidecar(name).catch(() => {})
-      res.json({ ok: true, elevated: false })
-    } catch (err: any) {
-      if (isAdminRequiredError(err)) {
-        try {
-          await runElevatedSchtasks(`/delete /tn ${name} /f`)
-          await deleteCronMetaSidecar(name).catch(() => {})
-          return res.json({ ok: true, elevated: true })
-        } catch (elevErr: any) {
-          return res.status(403).json({
-            error: 'Eliminazione fallita anche con UAC',
-            errorCode: 'admin_denied',
-            detail: String(elevErr?.message || elevErr).slice(0, 300),
-          })
-        }
-      }
-      res.status(500).json({ error: err.message })
-    }
+    res.status(500).json({ error: r.error || 'delete failed' })
   })
 
-  // V14.27 — PUT rename: blocca se task running, usa elevator op rename (export+delete+create-from-xml)
+  // V14.27 — PUT rename (atomic: nel PAL export+delete+create o copy+delete)
   router.put('/:name/rename', async (req, res) => {
     const oldName = String(req.params.name)
     const { newName } = (req.body || {}) as { newName?: string }
@@ -679,22 +534,12 @@ export function cronRouter() {
     }
 
     // Pre-check: newName non deve esistere
-    try {
-      await execAsync(`schtasks /query /tn "${newName}"`, { encoding: 'utf-8' })
+    const existing = await scheduler().get(newName)
+    if (existing) {
       return res.status(409).json({ error: `Esiste già un task con nome "${newName}"` })
-    } catch {
-      // newName non esiste, OK
     }
 
-    if (!(await isElevatorAvailable())) {
-      return res.status(503).json({
-        error: 'Rename richiede elevator (RM-Saio-Tauri-Elevator non registrato)',
-        errorCode: 'elevator_required',
-        hint: 'Esegui setup: pwsh scripts/dev.ps1 con conferma wizard',
-      })
-    }
-
-    const r = await runViaElevator({ op: 'rename', taskName: oldName, newName })
+    const r = await scheduler().rename(oldName, newName)
     if (!r.ok) {
       logger.error(`rename failed ${oldName}->${newName}: ${r.error}`)
       return res.status(500).json({ error: r.error || 'rename failed', detail: r.output })
@@ -712,21 +557,29 @@ export function cronRouter() {
       logger.warn(`audit log append failed: ${auditErr}`)
     }
 
-    res.json({ ok: true, name: newName, viaElevator: true })
+    res.json({ ok: true, name: newName })
   })
 
-  // V14.23 — Apri Task Scheduler GUI (no admin needed per aprire la GUI)
+  // Apri lo strumento di gestione automazioni nativo dell'OS.
+  // Windows: Task Scheduler GUI. macOS: cartella LaunchAgents in Finder.
   router.post('/open-gui', async (_req, res) => {
+    const plat = getPlatform().platform
     try {
-      await execAsync('start "" taskschd.msc', { encoding: 'utf-8', shell: 'cmd.exe' } as any)
-      res.json({ ok: true })
+      if (plat === 'win32') {
+        await execAsync('start "" taskschd.msc', { encoding: 'utf-8', shell: 'cmd.exe' } as any)
+        return res.json({ ok: true })
+      }
+      if (plat === 'darwin') {
+        await execAsync(`open "${path.join(os.homedir(), 'Library', 'LaunchAgents')}"`, { encoding: 'utf-8' })
+        return res.json({ ok: true })
+      }
+      return res.status(501).json({ error: 'Nessuna GUI nativa disponibile su questa piattaforma' })
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'failed to open Task Scheduler' })
+      res.status(500).json({ error: err?.message || 'failed to open task manager GUI' })
     }
   })
 
-  // V14.23 — POST / : crea nuovo task scheduled
-  // V14.27 — accetta + persiste: description (Comment field via set-comment) + details (sidecar JSON)
+  // V14.23 — POST / : crea nuovo task scheduled (delega al PAL)
   // Body: { name, schedule: { type: 'DAILY'|'WEEKLY'|'ONCE'|'MONTHLY', time: 'HH:MM', day?: 'MON|TUE|...', dayOfMonth?: '1-31' }, command, description, details }
   router.post('/', async (req, res) => {
     try {
@@ -736,7 +589,7 @@ export function cronRouter() {
         command?: string
         description?: string
         details?: string
-        commandType?: 'command' | 'file' // V14.28 — 'file' usa -File path (no -Command wrap)
+        commandType?: 'command' | 'file' // 'file' esegue lo script direttamente (no -c wrap)
       }
       if (!name || !/^[a-zA-Z0-9_-]{3,64}$/.test(name)) {
         return res.status(400).json({ error: 'name 3-64 char alphanum/dash/underscore richiesto' })
@@ -748,80 +601,52 @@ export function cronRouter() {
         return res.status(400).json({ error: 'schedule.type DAILY|WEEKLY|MONTHLY|ONCE richiesto' })
       }
       const time = schedule.time && /^\d{2}:\d{2}$/.test(schedule.time) ? schedule.time : '03:00'
-      let scParams = ''
-      let scheduleLabel = ''
+      const spec: ScheduleSpec = { type: schedule.type, time }
+      let scheduleLbl = ''
       if (schedule.type === 'DAILY') {
-        scParams = `/SC DAILY /ST ${time}`
-        scheduleLabel = `Daily ${time}`
+        scheduleLbl = `Daily ${time}`
       } else if (schedule.type === 'WEEKLY') {
         const day = schedule.day && /^(MON|TUE|WED|THU|FRI|SAT|SUN)$/.test(schedule.day) ? schedule.day : 'MON'
-        scParams = `/SC WEEKLY /D ${day} /ST ${time}`
-        scheduleLabel = `Weekly ${day} ${time}`
+        spec.day = day as ScheduleSpec['day']
+        scheduleLbl = `Weekly ${day} ${time}`
       } else if (schedule.type === 'MONTHLY') {
         const dom = schedule.dayOfMonth && /^([1-9]|[12][0-9]|3[01])$/.test(schedule.dayOfMonth) ? schedule.dayOfMonth : '1'
-        scParams = `/SC MONTHLY /D ${dom} /ST ${time}`
-        scheduleLabel = `Monthly day-${dom} ${time}`
+        spec.dayOfMonth = dom
+        scheduleLbl = `Monthly day-${dom} ${time}`
       } else {
-        scParams = `/SC ONCE /ST ${time}`
-        scheduleLabel = `Once ${time}`
+        scheduleLbl = `Once ${time}`
       }
-      // Force prefix RM-Dashboard- if not already (così validateTaskName ammette il task dopo creazione)
+
+      // Force prefix RM-Dashboard- se non già presente (così validateTaskName ammette il task).
       const taskName = name.toLowerCase().includes('obsidian') || name.toLowerCase().includes('rm-dashboard')
         ? name
         : `RM-Dashboard-${name}`
-      // V14.28 — wrap command: 'file' usa -File path (no quoting nidificato), 'command' usa -Command (legacy)
-      let trCommand: string
-      if (commandType === 'file') {
-        // command è path al .ps1. Doppie virgolette letterali nel TR.
-        trCommand = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \\"${command}\\"`
-      } else {
-        const escaped = command.replace(/"/g, '\\"')
-        trCommand = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command \\"${escaped}\\"`
-      }
-      const cmdLine = `schtasks /Create /TN "${taskName}" ${scParams} /TR "${trCommand}" /F`
-      const elevatedArgs = `/Create /TN ${taskName} ${scParams} /TR "${trCommand}" /F`
 
-      // V14.27 — persisti sidecar appena create OK (details + schedule label leggibile)
-      const persistSidecar = async () => {
-        if (details || scheduleLabel) {
-          await setCronMeta(taskName, { details: details || undefined, schedule: scheduleLabel })
-        }
+      const r = await scheduler().create({
+        name: taskName,
+        schedule: spec,
+        command,
+        commandIsFile: commandType === 'file',
+        description: description?.trim() || undefined,
+      })
+      if (!r.ok) {
+        return res.status(500).json({ error: r.error || 'creazione task fallita' })
       }
 
-      // V14.27 — set Comment field nativo schtasks (chiamata elevator separata, fa XML edit)
-      const persistComment = async () => {
-        if (description && description.trim()) {
-          if (await isElevatorAvailable()) {
-            const r = await runViaElevator({ op: 'set-comment', taskName, comment: description.trim() })
-            if (!r.ok) logger.warn(`set-comment failed for ${taskName}: ${r.error}`)
-          }
-        }
+      // Persisti sidecar (details + schedule label leggibile)
+      if (details || scheduleLbl) {
+        await setCronMeta(taskName, { details: details || undefined, schedule: scheduleLbl }).catch((e) =>
+          logger.warn(`sidecar persist failed for ${taskName}: ${e?.message}`)
+        )
+      }
+      // Assicura la description nativa (comment) anche dove create() non la imposta.
+      if (description && description.trim()) {
+        await scheduler().setComment(taskName, description.trim()).catch((e) =>
+          logger.warn(`set-comment failed for ${taskName}: ${e?.message}`)
+        )
       }
 
-      try {
-        await execAsync(cmdLine, { encoding: 'utf-8' })
-        await persistSidecar()
-        await persistComment()
-        res.status(201).json({ ok: true, name: taskName, description: description || '', elevated: false })
-      } catch (err: any) {
-        if (isAdminRequiredError(err)) {
-          // V14.27 — fallback elevator chain instead of bare UAC
-          try {
-            await runElevatedSchtasks(elevatedArgs)
-            await persistSidecar()
-            await persistComment()
-            return res.status(201).json({ ok: true, name: taskName, description: description || '', elevated: true })
-          } catch (elevErr: any) {
-            return res.status(403).json({
-              error: 'Creazione task fallita anche con UAC',
-              errorCode: 'admin_denied',
-              hint: 'Hai cliccato No al popup UAC, oppure UAC è disabilitato. Usa Task Scheduler GUI.',
-              detail: String(elevErr?.message || elevErr).slice(0, 300),
-            })
-          }
-        }
-        return res.status(500).json({ error: err?.message || 'failed' })
-      }
+      res.status(201).json({ ok: true, name: taskName, description: description || '' })
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'failed' })
     }
