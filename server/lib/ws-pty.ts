@@ -2,6 +2,9 @@ import { WebSocketServer, WebSocket } from 'ws'
 import type { Server as HttpServer, IncomingMessage } from 'node:http'
 import { ptyManager, type SpawnOptions } from './pty-manager'
 import { logger } from './logger'
+import { COOKIE_ACCESS, COOKIE_TRUSTED, isAuthRequired } from './auth/constants'
+import { verifyAccess, verifyTrusted } from './auth/jwt'
+import { isSessionRevoked } from './auth/session-store'
 
 const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:3030',
@@ -63,40 +66,108 @@ function parseSpawnOptions(rawUrl: string): SpawnOptions {
   return opts
 }
 
-export function attachPtyWebSocket(server: HttpServer) {
+// Richiesta LOCALE diretta = connessione TCP da loopback SENZA header di proxy.
+// Le richieste inoltrate dal tunnel Cloudflare arrivano anch'esse a 127.0.0.1 (cloudflared
+// gira in locale) MA con X-Forwarded-For settato → NON sono considerate locali.
+// Speculare a isLocalDirectRequest() in middleware/require-auth.ts.
+function isLocalDirectUpgrade(req: IncomingMessage): boolean {
+  if (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers['forwarded']) return false
+  const ip = req.socket?.remoteAddress || ''
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!header) return out
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq < 0) continue
+    const key = part.slice(0, eq).trim()
+    if (!key) continue
+    out[key] = decodeURIComponent(part.slice(eq + 1).trim())
+  }
+  return out
+}
+
+/**
+ * Autentica l'upgrade WebSocket riusando la STESSA logica fail-closed di requireAuth
+ * (server/middleware/require-auth.ts). L'upgrade gira su server.on('upgrade'), fuori dai
+ * middleware Express, quindi il controllo va replicato qui o il PTY (shell remota) resta
+ * aperto a chiunque raggiunga il tunnel. Il browser same-origin invia già i cookie di
+ * sessione nell'handshake; un client senza cookie/CF-Access valido viene rifiutato.
+ */
+async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promise<boolean> {
+  // Master switch dev: bypassa tutto
+  if (!isAuthRequired()) return true
+  // Desktop remote-only: la webview LOCALE entra senza login; il tunnel deve autenticarsi.
+  if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req)) return true
+  // SSO via Cloudflare Access: header iniettato dall'edge dopo verifica identità.
+  const cfEmailHeader = req.headers['cf-access-authenticated-user-email']
+  const ownerEmail = (process.env.DASHBOARD_OWNER_EMAIL || '').trim().toLowerCase()
+  if (typeof cfEmailHeader === 'string' && ownerEmail && cfEmailHeader.trim().toLowerCase() === ownerEmail) {
+    return true
+  }
+  const cookies = parseCookies(req.headers.cookie)
+  // Trusted device cookie (long-lived) prima, poi access token.
+  const trusted = cookies[COOKIE_TRUSTED]
+  if (trusted) {
+    const tp = await verifyTrusted(dataDir, trusted)
+    if (tp && !(await isSessionRevoked(dataDir, tp.sid))) return true
+  }
+  const at = cookies[COOKIE_ACCESS]
+  if (at) {
+    const payload = await verifyAccess(dataDir, at)
+    if (payload && !(await isSessionRevoked(dataDir, payload.sid))) return true
+  }
+  return false
+}
+
+export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
   const wss = new WebSocketServer({ noServer: true })
 
   server.on('upgrade', (req, socket, head) => {
-    try {
-      const url = req.url || ''
-      const match = url.match(/^\/api\/pty\/([a-zA-Z0-9_-]{1,64})(\?.*)?$/)
-      if (!match) {
-        socket.destroy()
-        return
-      }
-      const origin = req.headers.origin
-      if (origin && !ALLOWED_ORIGINS.has(origin)) {
-        logger.warn(`[ws] rejected origin: ${origin}`)
-        socket.destroy()
-        return
-      }
-      const projectId = match[1]
-      const spawnOpts = parseSpawnOptions(url)
-      if (Object.keys(spawnOpts).length > 0) {
-        logger.info(`[ws-pty] ${projectId} spawn opts from query: ${JSON.stringify(spawnOpts)}`)
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        handleConnection(ws, req, projectId, spawnOpts).catch((err) => {
-          logger.error('[ws-pty] handleConnection failed:', err)
-          try { ws.close(1011, 'handler error') } catch { /* ignore */ }
+    void (async () => {
+      try {
+        const url = req.url || ''
+        const match = url.match(/^\/api\/pty\/([a-zA-Z0-9_-]{1,64})(\?.*)?$/)
+        if (!match) {
+          socket.destroy()
+          return
+        }
+        const origin = req.headers.origin
+        if (origin && !ALLOWED_ORIGINS.has(origin)) {
+          logger.warn(`[ws] rejected origin: ${origin}`)
+          socket.destroy()
+          return
+        }
+        if (!(await authenticateUpgrade(req, dataDir))) {
+          logger.warn(`[ws] rejected unauthenticated upgrade from ${req.socket?.remoteAddress}`)
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        const projectId = match[1]
+        const spawnOpts = parseSpawnOptions(url)
+        if (Object.keys(spawnOpts).length > 0) {
+          logger.info(`[ws-pty] ${projectId} spawn opts from query: ${JSON.stringify(spawnOpts)}`)
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          handleConnection(ws, req, projectId, spawnOpts).catch((err) => {
+            logger.error('[ws-pty] handleConnection failed:', err)
+            try { ws.close(1011, 'handler error') } catch { /* ignore */ }
+          })
         })
-      })
-    } catch (err) {
-      logger.error('ws upgrade err:', err)
-      socket.destroy()
-    }
+      } catch (err) {
+        logger.error('ws upgrade err:', err)
+        socket.destroy()
+      }
+    })()
   })
 }
+
+// Identificatore progressivo di connessione: serve a tenere separata la geometria di ogni
+// browser collegato alla STESSA sessione PTY (iPhone e Mac sullo stesso progetto).
+let nextClientId = 1
 
 async function handleConnection(
   ws: WebSocket,
@@ -104,16 +175,54 @@ async function handleConnection(
   projectId: string,
   spawnOpts: SpawnOptions = {}
 ) {
+  // Il socket è già aperto quando entriamo qui, ma la sessione può richiedere secondi a
+  // nascere (spawn + attach tmux). Il client manda SUBITO il suo primo `resize` — cioè la
+  // geometria reale del terminale — e senza un listener quel messaggio andrebbe perso: il
+  // PTY resterebbe alla dimensione di default (100x30) mentre il browser ne mostra
+  // un'altra, ed è una delle cause dei residui di righe. Bufferizziamo dal primo istante e
+  // rigiochiamo appena la sessione è pronta.
+  const earlyMessages: string[] = []
+  const bufferEarly = (raw: unknown) => { earlyMessages.push(String(raw)) }
+  ws.on('message', bufferEarly)
+
   const session = await ptyManager.getOrCreate(projectId, spawnOpts)
   if ('error' in session) {
+    ws.off('message', bufferEarly)
     ws.send(JSON.stringify({ type: 'error', error: session.error }))
     ws.close()
     return
   }
 
-  // Replay buffer to newly connected client
-  if (session.buffer.length > 0) {
+  const clientId = nextClientId++
+
+  // Ridisegno completo via tmux, con throttle: più richieste ravvicinate (scroll) collassano
+  // in una sola. Il refresh scende per l'unico PTY della sessione, quindi ne beneficiano
+  // tutti i browser collegati.
+  const REFRESH_THROTTLE_MS = 120
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleRefresh = (delayMs = REFRESH_THROTTLE_MS) => {
+    if (!session.tmuxBacked || refreshTimer) return
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null
+      void ptyManager.refreshTmux(projectId)
+    }, delayMs)
+  }
+
+  // Replay del buffer storico al client appena connesso.
+  // NON si fa per le sessioni tmux: quel buffer contiene sequenze di ridisegno posizionate
+  // per le larghezze di prima, e riprodurle in un terminale di geometria diversa lasciava
+  // frammenti di righe vecchie sovrapposti (il "residuo" che si vedeva rientrando o
+  // scrollando). Con tmux la videata è ricostruibile su richiesta: la ridisegna il
+  // refresh-client qui sotto, pulita e alla geometria corrente.
+  if (!session.tmuxBacked && session.buffer.length > 0) {
     ws.send(JSON.stringify({ type: 'data', data: session.buffer.join('') }))
+  } else if (session.tmuxBacked) {
+    // Niente cronologia da versare: le sessioni Claude girano nello schermo alternato, dove
+    // `history_size` di tmux resta 0 — la conversazione la conserva Claude, che la riavvolge
+    // da sé quando riceve la rotella. Qui basta far ridisegnare a tmux la videata corrente.
+    // L'attesa dà tempo al primo `resize` del client, così si ridisegna già alla geometria
+    // giusta (e non due volte).
+    scheduleRefresh(300)
   }
 
   // Forward pty → client
@@ -133,24 +242,41 @@ async function handleConnection(
   session.exitHandlers.add(onExit)
 
   // Forward client → pty
-  ws.on('message', (raw) => {
+  const onMessage = (raw: unknown) => {
     try {
-      const msg = JSON.parse(raw.toString())
+      const msg = JSON.parse(String(raw))
       if (msg.type === 'data' && typeof msg.data === 'string') {
         ptyManager.write(projectId, msg.data)
       } else if (msg.type === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
-        ptyManager.resize(projectId, msg.cols, msg.rows)
+        ptyManager.setClientSize(projectId, clientId, msg.cols, msg.rows)
+        // Sempre, anche se la geometria non è cambiata: senza SIGWINCH tmux non ridisegna
+        // nulla e un client che si riaggancia con la stessa dimensione resterebbe al buio.
+        scheduleRefresh()
+      } else if (msg.type === 'refresh') {
+        // Richiesta esplicita del frontend (fine scroll): ridisegna la videata intera.
+        scheduleRefresh()
       } else if (msg.type === 'kill') {
         ptyManager.kill(projectId)
       }
     } catch {
       /* malformed */
     }
-  })
+  }
+  ws.off('message', bufferEarly)
+  ws.on('message', onMessage)
+  // Rigioca in ordine ciò che era arrivato durante lo spawn (di norma il primo resize).
+  for (const raw of earlyMessages) onMessage(raw)
+  earlyMessages.length = 0
 
   ws.on('close', () => {
     session.listeners.delete(onData)
     session.exitHandlers.delete(onExit)
+    if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
+    // Il vincolo di geometria di questo client non vale più: se restava stretto per colpa
+    // sua, i device rimasti possono tornare a usare tutto lo spazio (e vanno ridisegnati).
+    if (ptyManager.dropClientSize(projectId, clientId) && session.listeners.size > 0) {
+      setTimeout(() => { void ptyManager.refreshTmux(projectId) }, REFRESH_THROTTLE_MS)
+    }
     // NOTE: PTY session stays alive across client disconnects — user can reconnect
   })
 

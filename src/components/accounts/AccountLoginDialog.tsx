@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Loader2, CheckCircle2, XCircle, Terminal as TerminalIcon, Sparkles, Key, Send, ArrowDown } from 'lucide-react'
 import { api } from '@/lib/api'
+import { ptyWsUrl } from '@/lib/pty-ws'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 
@@ -76,7 +77,11 @@ export function AccountLoginDialog({ open, onClose, accountId, accountLabel, cli
           fontFamily: 'JetBrains Mono, Consolas, monospace',
           theme: { background: '#0a0a0a', foreground: '#e4e4e7', cursor: '#a78bfa' },
           scrollback: 5000,
-          convertEol: true,
+          // Disattivato come in EmbeddedChat.tsx (2026-08-03): converte ogni \n in \r\n,
+          // cioè riporta il cursore a colonna 0, mentre per un'applicazione a schermo
+          // intero il \n è un semplice avanzamento di riga che MANTIENE la colonna → testo
+          // scritto nel posto sbagliato. Non serve convertire: il PTY ha già ONLCR.
+          convertEol: false,
           allowProposedApi: true,
           scrollOnUserInput: true,
           smoothScrollDuration: 80,
@@ -104,9 +109,7 @@ export function AccountLoginDialog({ open, onClose, accountId, accountLabel, cli
         params.set('vpsId', target!)
         params.set('cliName', cliName)
       }
-      // Desktop (tauri://): hostname è "localhost" ma la CSP autorizza solo 127.0.0.1 → forziamo 127.0.0.1
-      const wsHost = window.location.protocol.startsWith('http') ? window.location.hostname : '127.0.0.1'
-      const wsUrl = `ws://${wsHost}:3031/api/pty/${encodeURIComponent(loginProjectId)}?${params.toString()}`
+      const wsUrl = ptyWsUrl(loginProjectId, params)
       console.log('[AccountLoginDialog] WS connect:', wsUrl, { target })
 
       try {

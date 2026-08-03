@@ -11,6 +11,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile, spawn as childSpawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { TMUX_BIN } from './tmux-bin'
 import { logger } from './logger'
 import { VPS_HOSTS, type VpsHost } from './ssh-inventory'
 import type { Account } from '../../shared/schemas'
@@ -283,6 +284,17 @@ export interface Session {
   recentTail?: string        // ultimi RECENT_TAIL_BYTES dell'output PTY (rolling)
   spawnedWithResume?: boolean // true se PTY era partita con --continue
   cwd?: string               // workspace dir, per ricostruire slug Claude in onExit
+  // Sessioni servite da tmux: lo schermo NON è uno stream ma uno stato ridisegnabile
+  // su richiesta (`tmux refresh-client`). Cambia due cose: niente replay del buffer al
+  // connect (sporcherebbe la videata con sequenze disegnate ad altre larghezze) e
+  // ridisegno esplicito quando serve.
+  tmuxBacked?: boolean
+  ptsName?: string           // pts del PTY = tty del client tmux, target di refresh-client
+  tmuxSession?: string       // nome sessione tmux, per leggerne la cronologia (capture-pane)
+  // Geometria dichiarata da ogni connessione WS collegata a QUESTA sessione (il PTY è
+  // uno solo e condiviso: senza negoziazione l'ultimo resize vince e gli altri device
+  // si ritrovano una griglia sbagliata).
+  clientSizes?: Map<number, { cols: number; rows: number }>
 }
 
 export interface SpawnOptions {
@@ -498,7 +510,16 @@ class PtyManager {
     }
 
     const cwd = opts.cwd || this.workspaceDirFor(projectId)
-    const env = { ...process.env, ...(opts.extraEnv || {}) } as any
+    // Locale UTF-8 forzata: SAIO parte come app GUI macOS, che NON eredita LANG dalla
+    // shell. Senza locale i caratteri accentati arrivano al PTY come '_' (sia in input
+    // che in output): "non è" diventava "non _", "così" → "cos_".
+    const env = {
+      ...process.env,
+      LANG: process.env.LANG || 'it_IT.UTF-8',
+      LC_ALL: process.env.LC_ALL || 'it_IT.UTF-8',
+      LC_CTYPE: process.env.LC_CTYPE || 'UTF-8',
+      ...(opts.extraEnv || {}),
+    } as any
 
     // V13-T3.2 + V13.1-BUG1c: Resolve account
     // 1. If opts.accountId explicit → use it
@@ -556,12 +577,51 @@ class PtyManager {
       opts = { ...opts, remote: { vpsId: account.target, cliName: cliForRemote } }
     }
 
+    // card→tmux (Nicola): per progetti normali con cartella ~/dev/<name>, la card apre/attacca
+    // la sessione tmux omonima (nome = cartella, via hook ~/.zshrc). Attach se viva, altrimenti
+    // crea + avvia claude. Sostituisce la vecchia patch hardcoded: generico, vale anche per progetti nuovi.
+    let __tmuxName: string | null = null
+    if (projectId !== 'terminal' && !opts.remote) {
+      try {
+        const { projectsStore } = await import('./projects-store')
+        const __p = await projectsStore.findById(projectId)
+        const __nm = __p?.name
+        if (__nm && /^[a-zA-Z0-9._-]+$/.test(__nm) && fs.existsSync(path.join(os.homedir(), 'dev', __nm))) {
+          __tmuxName = __nm
+        }
+      } catch { /* nessun progetto → fallback normale */ }
+    }
+
     // ==== V13: Remote SSH branch ============================================
     // If opts.remote is set → spawn via ssh wrapper to a VPS. Resume flag is
     // respected (--continue on cli if supported). Model/permissionMode passed.
     let effectiveCmd: string
     let shouldResume = false
-    if (opts.remote) {
+    let tmuxSession: string | undefined // sessione da cui leggere la cronologia al connect
+    if (projectId === 'terminal') {
+      // Terminale condiviso: attacca alla sessione tmux 'main' (creandola se manca) e apre
+      // SUBITO choose-tree con la lista di TUTTE le sessioni → l'utente sceglie quale progetto
+      // riprendere (le sessioni sono nominate per cartella via ~/.zshrc). Così da SAIO desktop
+      // e mobile si vedono e si riprendono tutte le sessioni aperte sul Mac, non solo 'main'.
+      // Path assoluto: la shell `zsh -c` può non avere brew nel PATH. Il `\;` (escaped) è il
+      // separatore multi-comando di tmux, passato letterale da zsh.
+      effectiveCmd = `${TMUX_BIN} new-session -A -s main \\; choose-tree -Zs`
+      tmuxSession = 'main'
+      logger.info(`[pty] ${projectId}: shared tmux terminal (choose-tree) → ${effectiveCmd}`)
+    } else if (projectId.startsWith('tmux-')) {
+      // Pagina "Sessioni": attach diretto alla sessione tmux scelta dalla lista.
+      // projectId = `tmux-<nome-sessione>`.
+      const __sess = projectId.slice(5)
+      if (!/^[a-zA-Z0-9._-]+$/.test(__sess)) return { error: `invalid tmux session: ${__sess}` }
+      effectiveCmd = `exec ${TMUX_BIN} attach -t ${__sess}`
+      tmuxSession = __sess
+      logger.info(`[pty] ${projectId}: attach diretto a sessione tmux "${__sess}"`)
+    } else if (__tmuxName) {
+      const __dir = path.join(os.homedir(), 'dev', __tmuxName)
+      effectiveCmd = `if ${TMUX_BIN} has-session -t ${__tmuxName} 2>/dev/null; then :; else ${TMUX_BIN} new-session -d -s ${__tmuxName} -c ${__dir}; ${TMUX_BIN} send-keys -t ${__tmuxName} claude Enter; fi; exec ${TMUX_BIN} attach -t ${__tmuxName}`
+      tmuxSession = __tmuxName
+      logger.info(`[pty] ${projectId}: card→tmux ${__tmuxName} (cwd ${__dir})`)
+    } else if (opts.remote) {
       const vps: VpsHost | undefined = VPS_HOSTS.find((v) => v.id === opts.remote!.vpsId)
       if (!vps) return { error: `unknown vpsId: ${opts.remote.vpsId}` }
       const cliName = opts.remote.cliName
@@ -685,6 +745,12 @@ class PtyManager {
       recentTail: '',
       spawnedWithResume: shouldResume,
       cwd,
+      // I tre rami tmux (terminale condiviso, attach diretto, card→tmux) sono gli unici
+      // che invocano il binario; gli altri lanciano il CLI nudo.
+      tmuxBacked: effectiveCmd.includes(TMUX_BIN),
+      ptsName: (proc as any).ptsName,
+      tmuxSession,
+      clientSizes: new Map(),
     }
 
     proc.onData((data) => {
@@ -823,6 +889,69 @@ class PtyManager {
       s.proc.resize(Math.max(10, cols), Math.max(5, rows))
       return true
     } catch {
+      return false
+    }
+  }
+
+  /**
+   * Ridimensiona il PTY sulla geometria del client PIÙ RECENTE — cioè il device che si sta
+   * usando davvero. Una finestra tmux ha una sola griglia: con due device collegati alla
+   * stessa sessione una dimensione va scelta, e prendere il minimo significava che il PC
+   * restava rimpicciolito sul telefono anche dopo esserci tornati sopra. `clientSizes` è
+   * una Map (ordine d'inserimento) e chi manda un resize viene rimesso in fondo: l'ultimo
+   * a farsi vivo vince. No-op se la dimensione non cambia, così non si manda un SIGWINCH
+   * inutile (che farebbe ridisegnare tmux e rimandare dati).
+   */
+  private applyNegotiatedSize(s: Session): boolean {
+    const sizes = s.clientSizes
+    if (!sizes || sizes.size === 0) return false
+    let latest: { cols: number; rows: number } | undefined
+    for (const g of sizes.values()) latest = g // l'ultimo del ciclo = inserito più di recente
+    if (!latest) return false
+    const nextCols = Math.max(10, latest.cols)
+    const nextRows = Math.max(5, latest.rows)
+    if (s.proc.cols === nextCols && s.proc.rows === nextRows) return false
+    try {
+      s.proc.resize(nextCols, nextRows)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Registra la geometria di una connessione WS e la rende quella attiva. */
+  setClientSize(projectId: string, clientId: number, cols: number, rows: number): boolean {
+    const s = this.sessions.get(projectId)
+    if (!s) return false
+    if (!s.clientSizes) s.clientSizes = new Map()
+    s.clientSizes.delete(clientId) // re-inserire lo sposta in fondo = diventa il più recente
+    s.clientSizes.set(clientId, { cols, rows })
+    return this.applyNegotiatedSize(s)
+  }
+
+  /** Una connessione se n'è andata: si torna alla geometria di chi resta. */
+  dropClientSize(projectId: string, clientId: number): boolean {
+    const s = this.sessions.get(projectId)
+    if (!s?.clientSizes) return false
+    if (!s.clientSizes.delete(clientId)) return false
+    return this.applyNegotiatedSize(s)
+  }
+
+  /**
+   * Forza tmux a ridisegnare l'INTERA videata per il nostro client. Serve perché tmux
+   * ridipinge solo le celle cambiate: dopo uno scroll, o alla riconnessione con la stessa
+   * geometria (nessun SIGWINCH), il browser resterebbe con frammenti vecchi o schermo vuoto.
+   * Sostituisce il vecchio trucco della micro-variazione di larghezza.
+   */
+  async refreshTmux(projectId: string): Promise<boolean> {
+    const s = this.sessions.get(projectId)
+    if (!s?.tmuxBacked || !s.ptsName) return false
+    try {
+      await execFileAsync(TMUX_BIN, ['refresh-client', '-t', s.ptsName], { timeout: 3000 })
+      return true
+    } catch {
+      // Client non ancora attaccato (tmux sta partendo) o sessione appena morta: non è
+      // un errore — al prossimo resize/scroll si riprova.
       return false
     }
   }

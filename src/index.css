@@ -287,6 +287,15 @@
      opens via the topbar burger menu. */
 }
 
+/* Claude Code marca il markdown *corsivo* con SGR 3 parola per parola; nella webview
+   quelle parole finivano disegnate come blocchetti evidenziati, illeggibili in mezzo
+   al testo. Il corsivo nel terminale non aggiunge informazione: lo rendiamo normale
+   e togliamo qualunque sfondo ereditato. */
+.xterm .xterm-italic {
+  font-style: normal !important;
+  background-color: transparent !important;
+}
+
 /* V15.9 WS43 — mobile dialog/sheet content height fix. Radix UI dialogs
    sometimes overflow on phones; cap to 100dvh and enable internal scroll. */
 @media (max-width: 640px) {
@@ -294,5 +303,33 @@
     max-height: 100dvh;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* PWA iOS (icona in home, display standalone) — 2026-08-03.
+   Con status-bar-style "black" iOS riserva già la fascia e env() vale 0;
+   con "black-translucent" (o su un'icona installata prima di questo cambio) la UI
+   arriva sotto notch/dynamic island e senza questo padding l'header — incluso il
+   pulsante della sidebar — finisce sotto l'orologio. Vale anche per la home indicator. */
+@media (display-mode: standalone) {
+  #root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+/* Vista a schermo intero su PWA iOS — 2026-08-03.
+   Il container fullscreen è `fixed inset-0`, quindi esce dal flusso di #root e perde il
+   padding safe-area: senza questo, il notch copriva la barra con "Riduci"/"Clear",
+   rendendoli non cliccabili. */
+@media (display-mode: standalone) {
+  .saio-fullscreen {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 }

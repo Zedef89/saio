@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { Loader2, XCircle, RefreshCw, RotateCcw, Sparkles, History, Eraser, FileText, Send } from 'lucide-react'
+import { Loader2, XCircle, RefreshCw, RotateCcw, Sparkles, History, Eraser, FileText, Send, Maximize2, Minimize2, Paperclip } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -13,6 +14,7 @@ import {
 import { ChatInputBar, type ModelId, type PermissionMode } from './ChatInputBar'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { ptyWsUrl } from '@/lib/pty-ws'
 
 interface EmbeddedChatProps {
   projectId: string
@@ -125,6 +127,13 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
   const fitRef = useRef<FitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const kickoffInjectedRef = useRef<boolean>(false)
+  // Scroll in corso: entro ~1s da un gesto si ridisegna a ogni dato in arrivo, per non
+  // lasciare a schermo i glifi vecchi mentre Claude riavvolge la conversazione.
+  const lastScrollAtRef = useRef<number>(0)
+  const scrollRepaintRef = useRef<(() => void) | null>(null)
+  // Distingue chiusura WS volontaria (unmount/cambio sessione/exit reale) da caduta
+  // inattesa (iOS sospende la pagina in background): sulla seconda si auto-riconnette.
+  const intentionalCloseRef = useRef<boolean>(false)
   const promptReadyRef = useRef<boolean>(false)
   const [promptReadyTick, setPromptReadyTick] = useState(0)
   const [status, setStatus] = useState<'connecting' | 'ready' | 'error' | 'closed'>('connecting')
@@ -133,6 +142,8 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
   const [errMsg, setErrMsg] = useState<string>('')
   const [nonce, setNonce] = useState(0)
   const [forceNew, setForceNew] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
   // V14.1: tick incrementato a onopen/onclose del WS per derivare reattivamente
   // l'abilitazione dell'input bar dal readyState corrente di wsRef.
   const [wsTick, setWsTick] = useState(0)
@@ -263,22 +274,16 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
         description: m.text,
       })))
 
-      // V15.0 WS22 — Promuovi a Inbox come in-session brief + segnala waiting_user
+      // DISATTIVATO (Nicola, 2026-07-24): la promozione a brief Inbox chiamava
+      // `promoteChoicesToInbox` → POST /api/briefs/summarize → `claude -p` con Haiku a
+      // OGNI menu/permesso mostrato dalla sessione osservata. Nel workflow di Nicola
+      // (molte sessioni interattive, permessi a raffica, Inbox rimossa dalla sidebar)
+      // = solo consumo Haiku + notifiche a vuoto (7 invocazioni in 13s misurate).
+      // Vedi ~/dev/saio/NOTA-LORENZO-brief-token.md. I `pendingChoices` locali (bottoni
+      // rapidi qui sopra) restano attivi: sono gratis, non chiamano nessun LLM.
+      // Per riattivare: ripristina la chiamata a promoteChoicesToInbox + il session-status.
       const choicesKey = uniqueArr.map(m => `${m.num}.${m.text}`).join('|')
-      if (choicesKey !== lastPromotedChoicesKeyRef.current) {
-        lastPromotedChoicesKeyRef.current = choicesKey
-        // Fire-and-forget: errori non bloccano UI (pendingChoices locali OK comunque)
-        promoteChoicesToInbox(uniqueArr, projectId, buf, providerHintRef.current).catch((err) =>
-          console.warn('[EmbeddedChat] promote to Inbox failed (non-fatal):', err)
-        )
-        // Segnala backend: questa sessione è in attesa scelta utente (pallino giallo)
-        fetch(`/api/projects/${encodeURIComponent(projectId)}/session-status`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'waiting_user' }),
-        }).catch(() => { /* non-fatal */ })
-      }
+      lastPromotedChoicesKeyRef.current = choicesKey
     } else {
       setPendingChoices([])
 
@@ -336,10 +341,15 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
   useEffect(() => {
     if (!containerRef.current) return
 
+    const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
-      fontFamily: 'JetBrains Mono, Consolas, monospace',
+      // Mobile: font più piccolo → più colonne → le righe lunghe (codice, diff) non si
+      // spezzano di continuo e restano leggibili. Desktop resta a 13.
+      fontSize: isMobile ? 10 : 13,
+      // Font monospace di sistema (come il Terminale.app: SF Mono/Menlo su Mac).
+      // JetBrains Mono non è caricato come webfont → cadeva su un mono generico.
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
       theme: {
         background: '#0a0a0a',
         foreground: '#e4e4e7',
@@ -347,8 +357,21 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
         selectionBackground: '#3f3f46',
       },
       scrollback: 5000,
-      convertEol: true,
+      // convertEol DEVE restare disattivato (era `true` — causa delle "scritte
+      // sovrapposte", 2026-08-03). Trasforma ogni \n in \r\n, cioè riporta il cursore a
+      // colonna 0. Ma tmux usa il \n come puro avanzamento di riga MANTENENDO la colonna:
+      // catturata dal vivo la sequenza `ESC[1;3H ESC[K \n 48. Un container…` — tmux si
+      // aspetta che il testo finisca in colonna 3, con convertEol finiva in colonna 0.
+      // Da lì la riga resta disallineata, e siccome tmux invia solo le differenze l'errore
+      // persiste fino a un ridisegno completo (il "riduci e riapri" che sembrava sistemare).
+      // Nessun bisogno di convertirlo: il PTY ha già ONLCR, l'output arriva con \r\n.
+      convertEol: false,
       allowProposedApi: true,
+      // Scroll: il default xterm è 1 riga per scatto di rotella → sembra lentissimo
+      // rispetto al Terminale nativo. Allineato alla sensibilità di macOS.
+      scrollSensitivity: 5,
+      fastScrollSensitivity: 12,
+      smoothScrollDuration: 0,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -356,18 +379,23 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     termRef.current = term
     fitRef.current = fit
 
+    // Renderer: DOM ovunque. Il WebGL (GPU) era attivo su desktop perché rende il testo
+    // più nitido su Retina, ma con Claude Code — che ridipinge solo le celle CAMBIATE —
+    // lasciava a schermo i glifi vecchi: le "scritte sovrapposte" durante lo scroll.
+    // Su mobile era già disattivato (iOS Safari lo rende lento e i suoi canvas rubavano il
+    // touch). Disattivato anche su desktop il 2026-08-03, su richiesta esplicita: leggibile
+    // batte nitido. Per riprovarlo: reimportare WebglAddon e `term.loadAddon(new WebglAddon())`.
+
     try { fit.fit() } catch { /* ignore */ }
 
     const params = new URLSearchParams()
     if (forceNew) params.set('forceNew', 'true')
     if (appliedModel && appliedModel !== 'default') params.set('model', appliedModel)
     if (appliedPerm && appliedPerm !== 'default') params.set('permissionMode', appliedPerm)
-    const qs = params.toString() ? `?${params.toString()}` : ''
-    // Desktop (tauri://): hostname è "localhost" ma la CSP autorizza solo 127.0.0.1 → forziamo 127.0.0.1
-    const wsHost = window.location.protocol.startsWith('http') ? window.location.hostname : '127.0.0.1'
-    const wsUrl = `ws://${wsHost}:3031/api/pty/${encodeURIComponent(projectId)}${qs}`
+    const wsUrl = ptyWsUrl(projectId, params)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
+    intentionalCloseRef.current = false // nuova connessione: eventuali cadute qui sono inattese
 
     ws.onopen = () => {
       const { cols, rows } = term
@@ -383,11 +411,15 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
           // V14.7: auto-inject kickoff è in un useEffect dedicato (no più stale closure su projectQ.data)
         } else if (msg.type === 'data') {
           term.write(msg.data)
+          // Se è appena arrivato un gesto di scroll, questi dati sono il ridisegno di
+          // Claude: forziamo il repaint per non lasciare i glifi vecchi sotto.
+          if (Date.now() - lastScrollAtRef.current < 1000) scrollRepaintRef.current?.()
           detectPrompts(msg.data)
         } else if (msg.type === 'error') {
           setStatus('error')
           setErrMsg(msg.error || 'server error')
         } else if (msg.type === 'exit') {
+          intentionalCloseRef.current = true // sessione finita davvero → niente auto-reconnect
           setStatus('closed')
           term.write(`\r\n\x1b[33m[session ended, code=${msg.code}]\x1b[0m\r\n`)
         }
@@ -402,6 +434,9 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     ws.onclose = () => {
       if (status !== 'error') setStatus('closed')
       setWsTick((t) => t + 1)
+      // La riconnessione la gestisce SOLO il listener visibilitychange (ritorno in
+      // foreground). Un auto-reconnect anche qui poteva sovrapporsi e causare un doppio
+      // replay del buffer → l'output appariva duplicato ("ripete la stessa frase").
     }
 
     // V15.9 WS44 — Browser-style copy/paste in xterm:
@@ -459,8 +494,87 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     }
     window.addEventListener('resize', onResize)
 
+    // ===== SCROLL: NON lo gestiamo noi ===================================================
+    // Misurato il 2026-08-03: Claude Code gira nello schermo alternato (niente scrollback
+    // nel terminale) e chiede il mouse al terminale (modi 1000/1002/1003/1006). È LUI a
+    // scorrere la propria conversazione quando riceve la rotella — esattamente ciò che
+    // succede in un terminale normale. tmux, pur avendo `mouse on`, lascia passare gli
+    // eventi all'applicazione quando questa li ha richiesti (verificato: `pane_in_mode`
+    // resta 0 dopo la rotella).
+    //
+    // Quindi la rotella deve arrivare INTATTA a Claude: xterm la inoltra da sé e noi non
+    // dobbiamo né intercettarla né forzare ridisegni. I due tentativi precedenti facevano
+    // proprio questo — il "nudge" di resize agganciato alla rotella, e poi lo scroll locale
+    // del buffer — ed erano la causa delle scritte sballate e dello scroll che non risaliva.
+    //
+    // Su touch la rotella non esiste: il pan del dito viene tradotto nelle stesse sequenze
+    // mouse SGR, così anche da telefono a scorrere è Claude. Il TAP (senza movimento) non
+    // viene prevenuto, quindi continua ad aprire la tastiera / posizionare il cursore.
+    const containerEl = containerRef.current
+    const TOUCH_WHEEL_SENSITIVITY = 1.4 // eventi rotella per cella di movimento del dito
+    let touchY = 0
+    let wheelAccum = 0
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) { touchY = e.touches[0].clientY; wheelAccum = 0 }
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return
+      const y = e.touches[0].clientY
+      const dy = touchY - y // dy<0 = dito verso il basso = risali nella conversazione
+      touchY = y
+      const cellH = containerEl && term.rows > 0 ? containerEl.clientHeight / term.rows : 18
+      wheelAccum += (dy / cellH) * TOUCH_WHEEL_SENSITIVITY
+      const steps = Math.trunc(wheelAccum)
+      if (steps === 0) return
+      e.preventDefault() // il gesto è del terminale: la pagina dietro non deve scorrere
+      wheelAccum -= steps
+      const sock = wsRef.current
+      if (!sock || sock.readyState !== WebSocket.OPEN) return
+      const btn = steps < 0 ? 64 : 65 // 64 = rotella su, 65 = giù
+      const cx = Math.max(1, Math.min(200, Math.round((term.cols || 80) / 2)))
+      const cy = Math.max(1, Math.min(200, Math.round((term.rows || 24) / 2)))
+      const seq = `\x1b[<${btn};${cx};${cy}M` // sequenza mouse SGR (mode 1006)
+      for (let i = 0; i < Math.abs(steps); i++) sock.send(JSON.stringify({ type: 'data', data: seq }))
+    }
+
+    // Residui di scritte durante lo scroll: Claude ridipinge solo le celle CAMBIATE, e il
+    // renderer (WebGL su desktop, DOM su mobile) può lasciare a schermo i glifi vecchi —
+    // il buffer di xterm è corretto, è il disegno a restare indietro. `term.refresh()`
+    // ridisegna dal buffer: costa poco, è tutto locale e NON manda niente al server (era
+    // proprio il traffico verso il server, nei tentativi precedenti, a rompere lo scroll).
+    let repaintRaf = 0
+    const repaint = () => {
+      if (repaintRaf) return
+      repaintRaf = requestAnimationFrame(() => {
+        repaintRaf = 0
+        try { term.refresh(0, Math.max(0, term.rows - 1)) } catch { /* term già disposto */ }
+      })
+    }
+    // Finestra "sto scrollando": mentre è aperta si ridisegna a ogni blocco di dati in
+    // arrivo, così resta leggibile DURANTE il gesto e non solo alla fine.
+    const markScrolling = () => {
+      lastScrollAtRef.current = Date.now()
+      repaint()
+      setTimeout(repaint, 150)
+    }
+    scrollRepaintRef.current = repaint
+
+    // Il wheel è solo OSSERVATO (passive, niente preventDefault/stopPropagation): deve
+    // continuare ad arrivare a Claude, che è chi scorre davvero la conversazione.
+    containerEl?.addEventListener('wheel', markScrolling, { passive: true })
+    containerEl?.addEventListener('touchstart', onTouchStart, { passive: true })
+    containerEl?.addEventListener('touchmove', onTouchMove, { passive: false })
+    containerEl?.addEventListener('touchend', markScrolling, { passive: true })
+
     return () => {
       window.removeEventListener('resize', onResize)
+      if (repaintRaf) cancelAnimationFrame(repaintRaf)
+      scrollRepaintRef.current = null
+      containerEl?.removeEventListener('wheel', markScrolling)
+      containerEl?.removeEventListener('touchstart', onTouchStart)
+      containerEl?.removeEventListener('touchmove', onTouchMove)
+      containerEl?.removeEventListener('touchend', markScrolling)
+      intentionalCloseRef.current = true // chiusura voluta (unmount/cambio sessione)
       ws.close()
       term.dispose()
       termRef.current = null
@@ -472,6 +586,38 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, nonce, forceNew, appliedModel, appliedPerm])
+
+  // Al ritorno in foreground (iOS aveva sospeso la pagina in background): se il socket
+  // è caduto, riconnetti. La sessione tmux è viva → il replay del buffer ripristina tutto.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState !== 'visible') return
+      const ws = wsRef.current
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        intentionalCloseRef.current = false
+        setStatus('connecting')
+        setNonce((n) => n + 1)
+        return
+      }
+      // Socket ancora vivo: ci siamo solo spostati su questo device. Una finestra tmux ha
+      // una sola griglia, e nel frattempo un altro device (il telefono) può averla
+      // rimpicciolita. Ri-misuriamo e rimandiamo la nostra geometria: il server dà la
+      // dimensione all'ultimo che si fa vivo, cioè a quello che si sta usando.
+      const term = termRef.current
+      const fit = fitRef.current
+      if (!term || !fit) return
+      try { fit.fit() } catch { /* ignore */ }
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+      }
+    }
+    document.addEventListener('visibilitychange', onVis)
+    window.addEventListener('focus', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('focus', onVis)
+    }
+  }, [])
 
   const reconnect = () => {
     setStatus('connecting')
@@ -547,6 +693,14 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     ws.send(JSON.stringify({ type: 'data', data: num + '\r' }))
     setPendingChoices([])
   }
+
+  // Invia una sequenza di tasti raw al PTY (senza \r). Usata dai bottoni tmux del
+  // "Terminale condiviso": es. '\x02s' = Ctrl-b s (\x02 = prefisso tmux Ctrl-b).
+  const sendKeys = useCallback((seq: string) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'data', data: seq }))
+  }, [])
 
   // V14.14: auto-inject kickoff brief
   // - aspetta status='ready' (PTY backend pronto) + sniff `❯` (TUI input ready)
@@ -624,9 +778,77 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
   const inputDisabled = status !== 'ready' || !wsOpen
   void wsTick // forza il useMemo di disabled a re-leggere wsRef.current.readyState
 
+  // Entrando/uscendo da tutto schermo il contenitore cambia dimensione:
+  // il terminale va rifittato, altrimenti resta della misura precedente.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { fitRef.current?.fit() } catch { /* ignore */ }
+    }, 60)
+    return () => clearTimeout(t)
+  }, [fullscreen])
+
+  // Drag&drop di file sul terminale (desktop). In Tauri il drag&drop di file è gestito
+  // a livello webview (gli eventi DOM 'drop' non arrivano) e ci dà direttamente il PATH
+  // locale del file: nessun upload, lo inietto così com'è nel messaggio via CustomEvent
+  // (ChatInputBar lo ascolta e lo appende all'input).
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+        const un = await getCurrentWebview().onDragDropEvent((event) => {
+          const p = event.payload as { type: string; paths?: string[]; position?: { x: number; y: number } }
+          const el = containerRef.current
+          if (!el) return
+          const rect = el.getBoundingClientRect()
+          const dpr = window.devicePixelRatio || 1
+          const inside = !!p.position && (() => {
+            const x = p.position!.x / dpr
+            const y = p.position!.y / dpr
+            return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+          })()
+          if (p.type === 'enter' || p.type === 'over') {
+            setDragActive(inside)
+          } else if (p.type === 'leave') {
+            setDragActive(false)
+          } else if (p.type === 'drop') {
+            setDragActive(false)
+            if (inside && Array.isArray(p.paths) && p.paths.length > 0) {
+              window.dispatchEvent(
+                new CustomEvent('saio-attach-paths', { detail: { projectId, paths: p.paths } })
+              )
+            }
+          }
+        })
+        if (cancelled) un()
+        else unlisten = un
+      } catch { /* API webview non disponibile */ }
+    })()
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectId])
+
   return (
-    <div className={className}>
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-card/60 flex-wrap gap-2">
+    <div
+      className={cn(
+        className,
+        fullscreen && 'fixed inset-0 z-50 bg-background flex flex-col rounded-none border-0 overscroll-contain saio-fullscreen'
+      )}
+      // Su mobile 100dvh segue la barra dinamica del browser: senza, il box fullscreen
+      // era più alto della viewport visibile e "scrollava" di quei pixel.
+      style={fullscreen ? { height: '100dvh' } : undefined}
+    >
+      {/* Barra controlli (Clear / Schermo intero / Riconnetti): fuori dal fullscreen resta
+          nel flusso della pagina e scorrendo spariva, rendendo impossibile tornare a tutto
+          schermo senza risalire. Sticky in cima, con sfondo opaco perché ci scorre sotto
+          il terminale. */}
+      <div
+        className={cn(
+          'flex items-center justify-between px-3 py-2 border-b border-border flex-wrap gap-2',
+          fullscreen ? 'bg-card/60' : 'sticky top-0 z-20 bg-card/95 backdrop-blur-sm'
+        )}
+      >
         <div className="flex items-center gap-2 text-xs min-w-0">
           {status === 'connecting' && (<><Loader2 className="w-3 h-3 animate-spin text-amber-400" /><span className="text-amber-400">Connecting...</span></>)}
           {status === 'ready' && !forceNew && hasHistory && (
@@ -740,6 +962,17 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
               <Eraser className="w-3 h-3" /> Clear
             </Button>
           )}
+          {/* Tutto schermo: vale ovunque compaia il terminale (progetti e sessioni) */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 text-[10px] gap-1 text-muted-foreground hover:text-foreground"
+            onClick={() => setFullscreen((f) => !f)}
+            title={fullscreen ? 'Esci da tutto schermo' : 'Tutto schermo'}
+          >
+            {fullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+            {fullscreen ? 'Riduci' : 'Schermo intero'}
+          </Button>
           {((status === 'ready' && hasHistory && !forceNew) || status === 'closed' || status === 'error') && (
             <Button
               size="sm"
@@ -759,12 +992,65 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
         </div>
       </div>
 
-      {/* xterm display (read-focused) + screensaver overlay quando sessione closed */}
-      <div className="relative w-full" style={{ height: '420px' }}>
+      {/* Barra comandi tmux — solo per il "Terminale condiviso" (projectId 'terminal').
+          I bottoni iniettano le sequenze nel PTY: comodo da mobile dove Ctrl-b è scomodo. */}
+      {projectId === 'terminal' && (
+        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border bg-card/40 flex-wrap text-[11px]">
+          <span className="text-muted-foreground mr-1 font-medium">tmux</span>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02s')} title="Lista di tutte le sessioni / progetti (Ctrl-b s)">📋 Sessioni</Button>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02w')} title="Lista finestre (Ctrl-b w)">🗔 Finestre</Button>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02c')} title="Nuova finestra (Ctrl-b c)">＋</Button>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02(')} title="Sessione precedente (Ctrl-b «(»)">◀</Button>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02)')} title="Sessione successiva (Ctrl-b «)»)">▶</Button>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x02d')} title="Stacca lasciando tutto in esecuzione (Ctrl-b d)">Stacca</Button>
+          <span className="w-px h-4 bg-border mx-1" />
+          <span className="text-muted-foreground text-[10px]">nei menu:</span>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x1b[A')} title="Su">↑</Button>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x1b[B')} title="Giù">↓</Button>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\r')} title="Invio / seleziona">⏎</Button>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => sendKeys('\x1b')} title="Esc / annulla">Esc</Button>
+        </div>
+      )}
+
+      {/* Barra di navigazione — SOLO mobile (md:hidden), per tutte le sessioni tranne il
+          Terminale condiviso che ha già la sua. Su iPhone non ci sono le frecce fisiche:
+          senza questi tasti, sui menu a scelta di Claude premendo Invio si accettava sempre
+          la prima opzione. sendKeys va via ws.send, quindi funziona anche con disableStdin. */}
+      {projectId !== 'terminal' && (
+        <div className="md:hidden flex items-center gap-1 px-2 py-1.5 border-b border-border bg-card/40 flex-wrap">
+          <span className="text-muted-foreground mr-0.5 text-[10px]">naviga:</span>
+          <Button size="sm" variant="outline" className="h-8 px-3 text-sm" onClick={() => sendKeys('\x1b[A')} title="Su">↑</Button>
+          <Button size="sm" variant="outline" className="h-8 px-3 text-sm" onClick={() => sendKeys('\x1b[B')} title="Giù">↓</Button>
+          <Button size="sm" variant="outline" className="h-8 px-3 text-sm" onClick={() => sendKeys('\x1b[D')} title="Sinistra">←</Button>
+          <Button size="sm" variant="outline" className="h-8 px-3 text-sm" onClick={() => sendKeys('\x1b[C')} title="Destra">→</Button>
+          <Button size="sm" variant="outline" className="h-8 px-3 text-xs gap-1" onClick={() => sendKeys('\r')} title="Invio / conferma">⏎ Invio</Button>
+          <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => sendKeys('\t')} title="Tab">Tab</Button>
+          {/* Shift+Tab = back-tab (CSI Z). In Claude Code cicla la modalità (auto/manual/plan):
+              da mobile non c'è modo di comporlo con la tastiera. */}
+          <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => sendKeys('\x1b[Z')} title="Shift+Tab — cambia modalità (auto/manual/plan)">⇧Tab</Button>
+          <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => sendKeys('\x1b')} title="Esc / annulla">Esc</Button>
+        </div>
+      )}
+
+      {/* xterm display (read-focused) + screensaver overlay quando sessione closed.
+          A tutto schermo il terminale prende l'altezza residua (flex-1): con l'altezza
+          fissa restava una fascia nera enorme sotto la barra di input. */}
+      <div
+        className={cn('relative w-full', fullscreen && 'flex-1 min-h-0')}
+        style={fullscreen ? undefined : { height: '420px' }}
+      >
         <div
           ref={containerRef}
           className="w-full h-full bg-[#0a0a0a]"
         />
+        {dragActive && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-primary/15 backdrop-blur-[1px] border-2 border-dashed border-primary/60 pointer-events-none">
+            <div className="flex items-center gap-2 text-primary text-sm font-medium bg-background/80 px-4 py-2 rounded-lg">
+              <Paperclip className="w-4 h-4" />
+              Rilascia per allegare il file
+            </div>
+          </div>
+        )}
         {status === 'closed' && (
           <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/97 overflow-hidden pointer-events-none">
             {/* Bouncing ball pong-style — animazioni CSS pure, ~0% CPU */}
@@ -832,6 +1118,7 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
         onSettingsApply={applySettings}
         settingsDirty={settingsDirty}
         providerName={effectiveCli}
+        projectId={projectId}
       />
 
       {/* V14.23 — Dialog SAIO-style per "Nuova conversazione" (rimpiazzo confirm() nativo) */}
