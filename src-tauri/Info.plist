@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Necessario per le note vocali: senza questa chiave la webview macOS nega
+         getUserMedia({audio:true}) senza mostrare alcun prompt. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SAIO usa il microfono per registrare note vocali da allegare alle sessioni Claude.</string>
+</dict>
+</plist>

@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Command as CommandIcon, Activity, CheckCircle2, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { NotificationPopover } from './NotificationPopover'
+// import { NotificationPopover } from './NotificationPopover' // disattivata 2026-08-03
 import { AccountSwitcher } from './AccountSwitcher'
 import { LanguageSwitcher } from '@/components/LanguageSwitcher'
 import { cn } from '@/lib/utils'
@@ -116,7 +116,8 @@ export function TopBar() {
 
         </TooltipProvider>
         <AccountSwitcher />
-        <NotificationPopover />
+        {/* Campanella notifiche rimossa su richiesta di Nicola (2026-08-03): non la usa e su
+              mobile rubava spazio all'header. Import e componente restano per riattivarla. */}
       </div>
     </header>
   )

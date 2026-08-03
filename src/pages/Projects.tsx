@@ -300,7 +300,7 @@ function ArchivedCard({
 export function ProjectsPage() {
   const queryClient = useQueryClient()
   const [query, setQuery] = useState('')
-  const [showAllActive, setShowAllActive] = useState(false)
+  const [showAllActive, setShowAllActive] = useState(true)
   const [archivedOpen, setArchivedOpen] = useState(false)
 
   const { data, isLoading, error } = useQuery({

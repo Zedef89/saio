@@ -6,9 +6,22 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
     <link rel="mask-icon" href="/brand/saio-icon-mono.svg" color="#a78bfa" />
-    <link rel="apple-touch-icon" sizes="64x64" href="/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- viewport-fit=cover: la UI arriva sotto notch/dynamic island (serve il safe-area nel CSS).
+         maximum-scale + user-scalable=no: su iOS evita lo zoom automatico quando si mette a fuoco
+         un input, che nel terminale sballava il layout. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <meta name="theme-color" content="#0a0a0a" />
+    <!-- PWA iOS: aperta da "Aggiungi a Home" gira standalone (niente barra Safari) e il
+         back-swipe naviga nella SPA invece di uscire verso le pagine di login. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="SAIO" />
     <meta name="description" content="SAIO — Smart AI Office. Dashboard operativa per orchestrare progetti, task e sessioni Claude in locale." />
     <title>SAIO — Smart AI Office</title>
   </head>
