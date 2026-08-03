@@ -112,10 +112,41 @@ export function vaultRouter() {
         mtime: stat.mtime.toISOString(),
         frontmatter,
         content,
+        // raw = file completo (frontmatter incluso): è ciò che l'editor modifica e risalva,
+        // così un save non perde mai il frontmatter.
+        raw: rawContent,
       })
     } catch (err) {
       logger.error('Vault file read failed:', err)
       res.status(404).json({ error: String(err) })
+    }
+  })
+
+  // Scrittura file vault (Nicola: modificare gli MD di Obsidian da SAIO).
+  // Salva il contenuto RAW così com'è. Backup automatico + scrittura atomica.
+  router.put('/file', async (req, res) => {
+    try {
+      const rel = String(req.body?.path || '')
+      const content = req.body?.content
+      if (!rel || rel.includes('..')) return res.status(400).json({ error: 'invalid path' })
+      if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' })
+      if (!rel.endsWith('.md')) return res.status(400).json({ error: 'only .md supported' })
+      const abs = path.join(VAULT_PATH, rel)
+      if (!insideVault(abs)) return res.status(403).json({ error: 'forbidden' })
+      const stat = await fs.stat(abs).catch(() => null)
+      if (!stat || !stat.isFile()) return res.status(404).json({ error: 'file not found' })
+
+      const { atomicWriteFile, backupIfExists } = await import('../lib/atomic-write')
+      await backupIfExists(abs, path.join(VAULT_PATH, '.saio-backups'))
+      await atomicWriteFile(abs, content)
+      treeCache = null // il tree può essere cambiato (dimensioni/mtime)
+
+      const st = await fs.stat(abs)
+      logger.info(`[vault] salvato ${rel} (${st.size} byte)`)
+      res.json({ ok: true, path: rel, size: st.size, mtime: st.mtime.toISOString() })
+    } catch (err) {
+      logger.error('Vault file write failed:', err)
+      res.status(500).json({ error: String(err) })
     }
   })
 

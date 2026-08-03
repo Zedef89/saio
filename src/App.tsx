@@ -3,6 +3,10 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from '@/components/layout/Layout'
 import { InboxPage } from '@/pages/Inbox'
 import { TasksPage } from '@/pages/Tasks'
+import { SessionsPage } from '@/pages/Sessions'
+import { ChatsPage } from '@/pages/Chats'
+import { MemoriesPage } from '@/pages/Memories'
+import { InfrastructurePage } from '@/pages/Infrastructure'
 import { ProjectsPage } from '@/pages/Projects'
 import { ProjectDetailPage } from '@/pages/ProjectDetail'
 import { NewProjectPage } from '@/pages/NewProject'
@@ -55,7 +59,12 @@ export default function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<Navigate to="/inbox" replace />} />
+          {/* Home = overview delle sessioni tmux attive (scelta di Nicola) */}
+          <Route index element={<Navigate to="/sessions" replace />} />
+          <Route path="sessions" element={<SessionsPage />} />
+          <Route path="chats" element={<ChatsPage />} />
+          <Route path="memories" element={<MemoriesPage />} />
+          <Route path="infrastructure" element={<InfrastructurePage />} />
           <Route path="inbox" element={<InboxPage />} />
           <Route path="tasks" element={<TasksPage />} />
           <Route path="projects" element={<ProjectsPage />} />

@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
@@ -9,12 +9,16 @@ import { AutoScanWizard } from '@/components/onboarding/AutoScanWizard'
 import { PtySessionsDialog } from '@/components/dialogs/PtySessionsDialog'
 import {
   Inbox,
+  TerminalSquare,
+  MessagesSquare,
+  Server,
   ListChecks,
   FolderKanban,
   Archive,
   BarChart3,
   Wand2,
   BookOpen,
+  Brain,
   Clock,
   Microscope,
   PanelLeftClose,
@@ -54,22 +58,32 @@ interface PtySessionInfo {
 }
 async function fetchPtySessions(): Promise<{ sessions: PtySessionInfo[] }> {
   try {
-    const res = await fetch('/api/pty/sessions', { credentials: 'include' })
+    // Sessioni tmux REALI della macchina (non solo i PTY spawnati da SAIO)
+    const res = await fetch('/api/system/tmux-sessions', { credentials: 'include' })
     if (!res.ok) return { sessions: [] }
-    return res.json()
+    const data = await res.json()
+    return {
+      sessions: (data.sessions || []).map((s: any) => ({
+        projectId: s.name,
+        startedAt: s.created ? new Date(s.created * 1000).toISOString() : undefined,
+      })),
+    }
   } catch {
     return { sessions: [] }
   }
 }
 
 const navItems = [
-  { to: '/inbox', i18nKey: 'sidebar.inbox', icon: Inbox, badge: true },
-  { to: '/tasks', i18nKey: 'sidebar.tasks', icon: ListChecks },
+  // Overview di TUTTE le sessioni tmux attive (home di Nicola)
+  { to: '/sessions', i18nKey: 'sidebar.sessions', label: 'Sessioni', icon: TerminalSquare },
+  { to: '/chats', i18nKey: 'sidebar.chats', label: 'Storico chat', icon: MessagesSquare },
   { to: '/projects', i18nKey: 'sidebar.projects', icon: FolderKanban },
   { to: '/docs', i18nKey: 'sidebar.docs', icon: BookOpen },
+  // Memorie di progetto + CLAUDE.md (globale e per progetto), in lettura/scrittura
+  { to: '/memories', i18nKey: 'sidebar.memories', label: 'Memorie', icon: Brain },
+  { to: '/infrastructure', i18nKey: 'sidebar.infrastructure', label: 'Infrastruttura', icon: Server },
   { to: '/deep-research', i18nKey: 'sidebar.deep_research', icon: Microscope },
   { to: '/cron', i18nKey: 'sidebar.automations', icon: Clock },
-  { to: '/archive', i18nKey: 'sidebar.archive', icon: Archive },
   { to: '/metrics', i18nKey: 'sidebar.metrics', icon: BarChart3 },
   { to: '/extras', i18nKey: 'sidebar.extras', icon: Wand2 },
 ] as const
@@ -140,7 +154,7 @@ export function Sidebar() {
                   ? 'text-muted-foreground'
                   : 'text-muted-foreground border-l-2 border-transparent'
               )
-              const label = t(item.i18nKey)
+              const label = (item as { label?: string }).label ?? t(item.i18nKey)
               const link = (
                 <NavLink to={item.to} className={linkClass}>
                   <item.icon className="w-4 h-4 shrink-0" />
@@ -202,10 +216,9 @@ export function Sidebar() {
 
         {/* V15.0 WS26 — Footer FISSO con SOLO Planner + Sessioni PTY (sempre visibili) */}
         <div className={cn('border-t border-border relative shrink-0 backdrop-blur-sm bg-card/40', collapsed ? 'p-2 space-y-2' : 'p-3 space-y-2')}>
-          {/* Orchestrator status — V15.0 WS3-3F vero check (ribrandato Planner in WS21) */}
-          <OrchestratorStatusIndicator collapsed={collapsed} />
+          {/* Planner (orchestrator Python) rimosso: Nicola non usa il flusso a decisioni. */}
 
-          {/* V15.0 WS21 — PTY sessions live (separato dal Planner per chiarezza) */}
+          {/* Sessioni tmux reali della macchina */}
           <PtySessionsIndicator collapsed={collapsed} />
         </div>
       </aside>
@@ -292,6 +305,7 @@ function OrchestratorStatusIndicator({ collapsed }: { collapsed: boolean }) {
 // se >0 sessioni live, grigio se zero. Click apre PtySessionsDialog per gestione.
 function PtySessionsIndicator({ collapsed }: { collapsed: boolean }) {
   const [dialogOpen, setDialogOpen] = useState(false)
+  const navigate = useNavigate()
   const { data } = useQuery({
     queryKey: ['pty', 'sessions'],
     queryFn: fetchPtySessions,
@@ -331,7 +345,7 @@ function PtySessionsIndicator({ collapsed }: { collapsed: boolean }) {
           <TooltipTrigger asChild>
             <button
               type="button"
-              onClick={() => setDialogOpen(true)}
+              onClick={() => navigate('/sessions')}
               className={cn(
                 'flex items-center justify-center p-2 rounded-md bg-gradient-to-br to-transparent border w-full transition-all hover:brightness-125',
                 c.from, c.border
@@ -349,7 +363,7 @@ function PtySessionsIndicator({ collapsed }: { collapsed: boolean }) {
           <TooltipTrigger asChild>
             <button
               type="button"
-              onClick={() => setDialogOpen(true)}
+              onClick={() => navigate('/sessions')}
               className={cn(
                 'w-full text-left rounded-md bg-gradient-to-br to-transparent border p-3 text-xs space-y-1 cursor-pointer transition-all hover:brightness-125 hover:scale-[1.02]',
                 c.from, c.border
@@ -359,7 +373,7 @@ function PtySessionsIndicator({ collapsed }: { collapsed: boolean }) {
                 <span className={cn('w-2 h-2 rounded-full', c.bg, c.shadow, active && 'animate-pulse')} />
                 <span className="font-medium text-foreground">Sessioni PTY</span>
               </div>
-              <div className="text-muted-foreground">{c.label} · click per gestire</div>
+              <div className="text-muted-foreground">{c.label} · apri elenco</div>
             </button>
           </TooltipTrigger>
           <TooltipContent side="right" className="text-xs">

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { BookOpen, Search, FileText, Loader2, X, ExternalLink } from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { BookOpen, Search, FileText, Loader2, X, Pencil, Save, Undo2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
+import { Textarea } from '@/components/ui/textarea'
 import { VaultTree, type TreeNode } from '@/components/docs/VaultTree'
 import { MarkdownRenderer } from '@/components/docs/MarkdownRenderer'
 import { formatRelativeTime } from '@/lib/utils'
@@ -17,7 +18,28 @@ async function fetchVaultTree() {
 async function fetchVaultFile(path: string) {
   const res = await fetch(`/api/vault/file?path=${encodeURIComponent(path)}`)
   if (!res.ok) throw new Error('File not found')
-  return res.json() as Promise<{ path: string; name: string; size: number; mtime: string; content: string }>
+  return res.json() as Promise<{
+    path: string
+    name: string
+    size: number
+    mtime: string
+    content: string
+    raw?: string
+  }>
+}
+
+async function saveVaultFile(path: string, content: string) {
+  const res = await fetch('/api/vault/file', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ path, content }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || 'Salvataggio fallito')
+  }
+  return res.json()
 }
 
 function findByBasename(nodes: TreeNode[], basename: string): TreeNode | null {
@@ -35,6 +57,9 @@ function findByBasename(nodes: TreeNode[], basename: string): TreeNode | null {
 export function DocsPage() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const queryClient = useQueryClient()
 
   const treeQuery = useQuery({ queryKey: ['vault', 'tree'], queryFn: fetchVaultTree })
   const fileQuery = useQuery({
@@ -43,12 +68,31 @@ export function DocsPage() {
     enabled: !!selectedPath,
   })
 
-  // Auto-open recommended file on first load
+  // Cambiando file si esce sempre dalla modalità modifica (evita di salvare sul file sbagliato)
   useEffect(() => {
-    if (treeQuery.data && !selectedPath) {
-      setSelectedPath('research/herbalife-uk-summary-IT-2026-04-23.md')
-    }
-  }, [treeQuery.data, selectedPath])
+    setEditing(false)
+    setDraft('')
+  }, [selectedPath])
+
+  const saveMutation = useMutation({
+    mutationFn: () => saveVaultFile(selectedPath!, draft),
+    onSuccess: () => {
+      toast.success('File salvato', { description: selectedPath || undefined })
+      setEditing(false)
+      queryClient.invalidateQueries({ queryKey: ['vault', 'file', selectedPath] })
+      queryClient.invalidateQueries({ queryKey: ['vault', 'tree'] })
+    },
+    onError: (err: Error) => {
+      toast.error('Salvataggio fallito', { description: err.message })
+    },
+  })
+
+  const startEditing = () => {
+    if (!fileQuery.data) return
+    // raw = file completo con frontmatter; fallback su content per compatibilità
+    setDraft(fileQuery.data.raw ?? fileQuery.data.content)
+    setEditing(true)
+  }
 
   const handleWikiLinkClick = (target: string) => {
     if (!treeQuery.data) return
@@ -103,7 +147,7 @@ export function DocsPage() {
         </div>
       </aside>
 
-      {/* Viewer */}
+      {/* Viewer / Editor */}
       <main className="flex-1 min-w-0 border border-border rounded-lg bg-card/30 overflow-hidden flex flex-col">
         {!selectedPath && (
           <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
@@ -132,17 +176,61 @@ export function DocsPage() {
                 <div className="text-sm font-semibold truncate">{fileQuery.data.name.replace(/\.md$/, '')}</div>
                 <div className="text-[10px] text-muted-foreground font-mono truncate">{fileQuery.data.path}</div>
               </div>
-              <div className="text-[10px] text-muted-foreground shrink-0">
-                {(fileQuery.data.size / 1024).toFixed(1)} KB · {formatRelativeTime(fileQuery.data.mtime)}
-              </div>
+
+              {!editing && (
+                <>
+                  <div className="text-[10px] text-muted-foreground shrink-0">
+                    {(fileQuery.data.size / 1024).toFixed(1)} KB · {formatRelativeTime(fileQuery.data.mtime)}
+                  </div>
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 shrink-0" onClick={startEditing}>
+                    <Pencil className="w-3 h-3" /> Modifica
+                  </Button>
+                </>
+              )}
+
+              {editing && (
+                <>
+                  <span className="text-[10px] text-amber-400 shrink-0">modifica in corso</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 text-xs gap-1.5 shrink-0"
+                    onClick={() => setEditing(false)}
+                    disabled={saveMutation.isPending}
+                  >
+                    <Undo2 className="w-3 h-3" /> Annulla
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-7 text-xs gap-1.5 shrink-0"
+                    onClick={() => saveMutation.mutate()}
+                    disabled={saveMutation.isPending}
+                  >
+                    {saveMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                    Salva
+                  </Button>
+                </>
+              )}
             </div>
+
             <div className="flex-1 overflow-auto scrollbar-thin">
-              <div className="max-w-4xl mx-auto px-8 py-6">
-                <MarkdownRenderer
-                  content={fileQuery.data.content}
-                  onWikiLinkClick={handleWikiLinkClick}
-                />
-              </div>
+              {editing ? (
+                <div className="h-full p-4">
+                  <Textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                    className="w-full h-full min-h-[60vh] font-mono text-xs leading-relaxed resize-none"
+                  />
+                </div>
+              ) : (
+                <div className="max-w-4xl mx-auto px-8 py-6">
+                  <MarkdownRenderer
+                    content={fileQuery.data.content}
+                    onWikiLinkClick={handleWikiLinkClick}
+                  />
+                </div>
+              )}
             </div>
           </>
         )}
