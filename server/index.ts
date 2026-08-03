@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import helmet from 'helmet'
 import fs from 'node:fs'
+import { chatsRouter } from './routes/chats'
+import { memoriesRouter } from './routes/memories'
+import { uploadsRouter } from './routes/uploads'
+import { coolifyRouter } from './routes/coolify'
 import { briefsRouter } from './routes/briefs'
 import { responsesRouter } from './routes/responses'
 import { tasksRouter } from './routes/tasks'
@@ -31,6 +35,7 @@ import { setHealthDataDir } from './lib/account-health'
 import { taskTypesStore } from './lib/task-types-store'
 import { customProvidersStore } from './lib/custom-providers-store'
 import { createServer } from 'node:http'
+import { execSync } from 'node:child_process'
 import { cronRouter } from './routes/cron'
 import { recipesRouter } from './routes/recipes'
 import { errorPipelineRouter } from './routes/error-pipeline'
@@ -71,6 +76,10 @@ function resolveDataDir(): string {
   return path.join(PROJECT_ROOT, 'data')
 }
 const DATA_DIR = resolveDataDir()
+// Esporta il data dir risolto: alcune lib (es. ssh-inventory) lo leggono da qui invece
+// di riceverlo come parametro. Senza, cadevano su process.cwd()/data → inventario VPS
+// vuoto nel bundle ("Nessun VPS" pur avendo ssh-inventory.json con 6 server).
+process.env.DASHBOARD_DATA_DIR = DATA_DIR
 const PORT = Number(process.env.SERVER_PORT || 3031)
 const HOST = '127.0.0.1'
 
@@ -219,7 +228,15 @@ app.use('/api/orchestrator', orchestratorRouter(DATA_DIR, getProjectById))
 app.use('/api/archive', archiveRouter(DATA_DIR))
 app.use('/api/metrics', metricsRouter(DATA_DIR))
 app.use('/api/mcp', mcpRouter())
-app.use('/api/credentials', credentialsRouter())
+// Storico conversazioni Claude Code (~/.claude/projects/<slug>/*.jsonl)
+app.use('/api/chats', chatsRouter())
+// Memorie di progetto Claude Code (~/.claude/projects/<slug>/memory/*.md) — lettura + scrittura
+app.use('/api/memories', memoriesRouter())
+// Allegati (foto/documenti/audio) per le sessioni: salva su disco e restituisce il path
+app.use('/api/uploads', uploadsRouter())
+// Istanze Coolify (inventario + stato via API)
+app.use('/api/coolify', coolifyRouter())
+app.use('/api/credentials', credentialsRouter(DATA_DIR))
 app.use('/api/ssh', sshRouter())
 app.use('/api/vps', vpsRouter())
 app.use('/api/mcp-discovery', mcpDiscoveryRouter(DATA_DIR))
@@ -293,12 +310,131 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Start
 // ============================================================
 const httpServer = createServer(app)
-attachPtyWebSocket(httpServer)
-httpServer.listen(PORT, HOST, () => {
+attachPtyWebSocket(httpServer, DATA_DIR)
+
+// Fix #22 (macOS beta test) — guardia EADDRINUSE: se l'app viene chiusa in modo
+// brusco il sidecar Node resta orfano sulla porta; al riavvio successivo il nuovo
+// sidecar crashava subito con EADDRINUSE e Tauri non lo rilancia (app aperta ma
+// backend morto, tunnel in 502). Qui: se la porta è occupata da un ALTRO sidecar
+// SAIO della stessa installazione, lo terminiamo e riproviamo il listen (l'app
+// appena avviata vince). Un processo sconosciuto non viene MAI toccato: usciamo
+// subito con un errore che ne riporta pid e command line.
+const LISTEN_MAX_RETRIES = 5
+const LISTEN_RETRY_DELAY_MS = 700
+let listenAttempt = 0
+
+// Firma forte: un gemello SAIO risponde /api/health con lo STESSO dataDir
+// (= stessa installazione). Un servizio estraneo che per caso risponde
+// {status:'ok'} non matcha e non viene mai toccato.
+async function portHeldBySameSaio(): Promise<boolean> {
+  try {
+    const res = await fetch(`http://${HOST}:${PORT}/api/health`, { signal: AbortSignal.timeout(2000) })
+    if (!res.ok) return false
+    const body = (await res.json()) as { status?: string; dataDir?: string }
+    return body.status === 'ok' && body.dataDir === DATA_DIR
+  } catch {
+    return false
+  }
+}
+
+function findListenerPids(): number[] {
+  try {
+    if (process.platform === 'win32') {
+      const out = execSync('netstat -ano -p tcp', { encoding: 'utf8' })
+      return out
+        .split('\n')
+        .filter((l) => l.includes(`:${PORT} `) && /LISTENING/i.test(l))
+        .map((l) => Number(l.trim().split(/\s+/).pop()))
+        .filter((pid) => Number.isInteger(pid) && pid > 0)
+    }
+    const out = execSync(`lsof -ti tcp:${PORT} -sTCP:LISTEN`, { encoding: 'utf8' })
+    return out
+      .split('\n')
+      .map((s) => Number(s.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0)
+  } catch {
+    return [] // lsof/netstat escono ≠0 anche solo quando non trovano nulla
+  }
+}
+
+function pidCommandLine(pid: number): string {
+  if (process.platform === 'win32') return ''
+  try {
+    return execSync(`ps -p ${pid} -o command=`, { encoding: 'utf8' }).trim()
+  } catch {
+    return ''
+  }
+}
+
+// Log di avvio registrato UNA volta: passarlo come callback a listen() dentro
+// startListen lo duplicherebbe ad ogni retry (ogni listen() aggiunge un once).
+httpServer.once('listening', () => {
   logger.info(`🚀 Dashboard server running on http://${HOST}:${PORT}`)
   logger.info(`🔌 WebSocket PTY endpoint: ws://${HOST}:${PORT}/api/pty/:projectId`)
   logger.info(`📁 Data dir: ${DATA_DIR}`)
 })
+
+function startListen(): void {
+  httpServer.listen(PORT, HOST)
+}
+
+httpServer.on('error', (err: Error) => {
+  const e = err as NodeJS.ErrnoException
+  if (e.code !== 'EADDRINUSE') {
+    logger.error('[listen] fatal server error:', err)
+    process.exit(1)
+  }
+  listenAttempt++
+  if (listenAttempt > LISTEN_MAX_RETRIES) {
+    logger.error(`[listen] port ${PORT} still in use after ${LISTEN_MAX_RETRIES} retries — giving up (see logs above)`)
+    process.exit(1)
+  }
+  void (async () => {
+    const sameSaio = await portHeldBySameSaio()
+    const pids = findListenerPids().filter((pid) => pid !== process.pid)
+    // Decisione per-pid. Il sidecar bundlato si riconosce dalla command line
+    // ('saio-server' copre anche l'orfano hung che non risponde più all'HTTP).
+    // Il dev server ('server/index.ts') richiede ANCHE la firma health per non
+    // uccidere il dev server di un ALTRO progetto sulla stessa porta. Su
+    // Windows la command line non è disponibile → solo firma health (limite:
+    // un orfano hung non è reclamabile lì, vedi ISSUE #22).
+    const killable = pids.filter((pid) => {
+      const cmd = pidCommandLine(pid)
+      if (cmd.includes('saio-server')) return true
+      if (cmd.includes('server/index.ts') && sameSaio) return true
+      if (process.platform === 'win32' && sameSaio) return true
+      return false
+    })
+    if (pids.length > 0 && killable.length === 0) {
+      logger.error(
+        `[listen] port ${PORT} in use by non-SAIO process(es): ` +
+          pids.map((pid) => `${pid} (${pidCommandLine(pid) || 'unknown cmd'})`).join(', ') +
+          ` — refusing to kill unknown processes; exiting. Free the port or set SERVER_PORT.`,
+      )
+      process.exit(1)
+    }
+    // SIGTERM dà all'orfano la chance di chiudere pulito; se dopo 2 giri è
+    // ancora lì (hung vero), escalation a SIGKILL.
+    const signal = listenAttempt >= 3 ? 'SIGKILL' : 'SIGTERM'
+    for (const pid of killable) {
+      logger.warn(`[listen] port ${PORT} held by orphan SAIO sidecar (pid ${pid}) — sending ${signal}`)
+      try {
+        process.kill(pid, signal)
+      } catch (killErr) {
+        if ((killErr as NodeJS.ErrnoException).code === 'EPERM') {
+          // Sidecar di un ALTRO utente della macchina: non possiamo (né
+          // dobbiamo) terminarlo — inutile ritentare.
+          logger.error(`[listen] cannot kill pid ${pid} (EPERM — owned by another user?); exiting`)
+          process.exit(1)
+        }
+        /* ESRCH: già terminato da solo */
+      }
+    }
+    setTimeout(startListen, LISTEN_RETRY_DELAY_MS)
+  })()
+})
+
+startListen()
 
 // ============================================================
 // Graceful shutdown

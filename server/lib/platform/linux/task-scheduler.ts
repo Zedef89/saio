@@ -7,11 +7,82 @@ import type {
   ITaskScheduler,
   ScheduledTask,
   ScheduleSpec,
+  WeekDay,
   OperationResult,
 } from '../types'
 import { LinuxElevator } from './elevator'
 
 const execAsync = promisify(exec)
+
+/** Timer di sistema Ubuntu: rumore vendor, non automazioni dell'utente. */
+const VENDOR_TIMERS =
+  /^(apt-daily|dpkg-db-backup|e2scrub|fstrim|logrotate|man-db|motd-news|systemd-|mdcheck|mdmonitor|certbot|snapd|ua-|update-notifier|anacron|plocate|sysstat-|launchpadlib-|apport-)/
+
+const WEEKDAYS: Record<string, { spec: WeekDay; label: string }> = {
+  Mon: { spec: 'MON', label: 'lunedì' },
+  Tue: { spec: 'TUE', label: 'martedì' },
+  Wed: { spec: 'WED', label: 'mercoledì' },
+  Thu: { spec: 'THU', label: 'giovedì' },
+  Fri: { spec: 'FRI', label: 'venerdì' },
+  Sat: { spec: 'SAT', label: 'sabato' },
+  Sun: { spec: 'SUN', label: 'domenica' },
+}
+
+/**
+ * `ExecStart={ path=/bin/bash ; argv[]=/bin/bash /root/script.sh ; ignore_errors=no ; … }`
+ * → `/bin/bash /root/script.sh`
+ */
+function parseExecStart(raw: string | undefined): string {
+  if (!raw) return ''
+  return /argv\[\]=([^;]+)/.exec(raw)?.[1]?.trim() ?? ''
+}
+
+/**
+ * Ricava schedule reale e label leggibile dalle proprietà di un `.timer`:
+ * - `TimersCalendar={ OnCalendar=*-*-* 23:50:00 Europe/Rome ; next_elapse=… }`
+ * - `TimersMonotonic={ OnUnitActiveUSec=15min ; next_elapse=… }`
+ * Il fuso è esplicitato in label quando presente nell'unit: la VPS è in UTC ma i
+ * timer migrati usano `Europe/Rome`, altrimenti l'orario mostrato sarebbe fuorviante.
+ */
+function parseTimerSchedule(props: Record<string, string[]>): { spec: ScheduleSpec; label?: string } {
+  const calendar = props.TimersCalendar?.map((v) => /OnCalendar=([^;]+)/.exec(v)?.[1]?.trim()).find(Boolean)
+  if (calendar) {
+    const tokens = calendar.split(/\s+/)
+    let dow: string | undefined
+    if (tokens[0] && !tokens[0].includes('-') && !tokens[0].includes(':')) dow = tokens.shift()
+    const datePart = tokens.find((t) => t.includes('-'))
+    const timePart = tokens.find((t) => t.includes(':'))
+    const tz = tokens.find((t) => t !== datePart && t !== timePart)
+    const suffix = tz ? ` (${tz})` : ''
+
+    const hm = timePart ? /^(\d{1,2}):(\d{2})/.exec(timePart) : null
+    // Espressioni tipo `*:0/15` o liste `08,20:00` non stanno in uno ScheduleSpec: si tiene la label grezza.
+    if (!hm || /[/,]/.test(timePart ?? '')) {
+      return { spec: { type: 'DAILY' }, label: `${calendar}` }
+    }
+    const time = `${hm[1]!.padStart(2, '0')}:${hm[2]}`
+
+    const day = dow ? WEEKDAYS[dow.split(/[,.]/)[0] ?? ''] : undefined
+    if (day) return { spec: { type: 'WEEKLY', time, day: day.spec }, label: `Ogni ${day.label} ${time}${suffix}` }
+
+    const dayOfMonth = datePart ? /-(\d{1,2})$/.exec(datePart)?.[1] : undefined
+    if (dayOfMonth) {
+      return {
+        spec: { type: 'MONTHLY', time, dayOfMonth },
+        label: `Ogni mese, giorno ${dayOfMonth}, ${time}${suffix}`,
+      }
+    }
+    return { spec: { type: 'DAILY', time }, label: `Ogni giorno ${time}${suffix}` }
+  }
+
+  const monotonic = props.TimersMonotonic ?? []
+  const interval = monotonic.map((v) => /OnUnitActiveUSec=([^;]+)/.exec(v)?.[1]?.trim()).find(Boolean)
+  if (interval) return { spec: { type: 'DAILY' }, label: `Ogni ${interval}` }
+  const boot = monotonic.map((v) => /OnBootUSec=([^;]+)/.exec(v)?.[1]?.trim()).find(Boolean)
+  if (boot) return { spec: { type: 'ONCE' }, label: `${boot} dopo il boot` }
+
+  return { spec: { type: 'DAILY' } }
+}
 
 /**
  * Linux Task Scheduler: usa **systemd-timer user-level** in
@@ -40,29 +111,107 @@ export class LinuxTaskScheduler implements ITaskScheduler {
   }
 
   async list(): Promise<ScheduledTask[]> {
-    try {
-      const { stdout } = await execAsync('systemctl --user list-timers --all --no-pager --no-legend', {
-        encoding: 'utf-8',
-      })
-      const tasks: ScheduledTask[] = []
+    const tasks: ScheduledTask[] = []
+    // Due scope: user-level (timer creati da SAIO in ~/.config/systemd/user) e system-level
+    // (le automazioni migrate dal Mac — worklog, vault-sync, komanda-* — vivono in /etc/systemd/system).
+    for (const userScope of [true, false]) {
+      const flag = userScope ? '--user ' : ''
+      let stdout = ''
+      try {
+        ;({ stdout } = await execAsync(`systemctl ${flag}list-timers --all --no-pager --no-legend`, {
+          encoding: 'utf-8',
+        }))
+      } catch {
+        continue // scope non disponibile (es. nessuna sessione utente): si prova l'altro
+      }
+
+      const rows: { timer: string; next?: string; last?: string }[] = []
       for (const line of String(stdout).split(/\r?\n/)) {
-        const m = /^([\d-]+\s[\d:]+\s\w+)\s+\S+\s+([\d-]+\s[\d:]+\s\w+)\s+\S+\s+(\S+\.timer)\s+(\S+\.service)/.exec(line)
+        // Le colonne NEXT/LEFT/LAST/PASSED sono multi-token e variabili ("2h 11min", "2min 7s ago", "-"):
+        // ci si ancora agli ultimi due campi (unit + activates), i timestamp si estraggono a parte.
+        const m = /(\S+)\.timer\s+(\S+)\.service\s*$/.exec(line.trim())
         if (!m) continue
-        const timerName = m[3]!.replace(/\.timer$/, '')
-        if (!timerName.startsWith('saio-')) continue
+        const timer = m[1]!
+        if (VENDOR_TIMERS.test(timer)) continue
+        // "Mon 2026-08-03 12:10:00 UTC" → il primo timestamp è NEXT, il secondo LAST ("-" se assente)
+        const stamps = line.match(/[A-Z][a-z]{2}\s\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\s\S+/g) ?? []
+        rows.push({ timer, next: stamps[0], last: stamps[1] })
+      }
+      if (!rows.length) continue
+
+      // Una sola `systemctl show` per scope: schedule reale (OnCalendar/OnUnitActiveSec) e comando.
+      const timerProps = await this.showUnits(flag, rows.map((r) => `${r.timer}.timer`), [
+        'Id',
+        'Description',
+        'UnitFileState',
+        'ActiveState',
+        'TimersCalendar',
+        'TimersMonotonic',
+      ])
+      const svcProps = await this.showUnits(flag, rows.map((r) => `${r.timer}.service`), ['Id', 'ExecStart'])
+
+      for (const r of rows) {
+        const name = r.timer.replace(/^saio-/, '')
+        if (tasks.some((t) => t.name === name)) continue
+        const p = timerProps.get(`${r.timer}.timer`) ?? {}
+        const { spec, label } = parseTimerSchedule(p)
+        const fileState = p.UnitFileState?.[0]
+        const activeState = p.ActiveState?.[0]
         tasks.push({
-          name: timerName.replace(/^saio-/, ''),
-          command: '',
-          schedule: { type: 'DAILY', time: '00:00' }, // parsed lazily da OnCalendar
-          state: 'ready',
-          nextRunAt: m[1],
-          lastRunAt: m[2],
+          name,
+          command: parseExecStart(svcProps.get(`${r.timer}.service`)?.ExecStart?.[0]),
+          schedule: spec,
+          scheduleLabel: label,
+          state: fileState === 'disabled' || (activeState && activeState !== 'active') ? 'disabled' : 'ready',
+          // I timer non creati da SAIO sono automazioni utente esterne: `cron` le esclude dal
+          // filtro per naming di routes/cron.ts (stesso trattamento dei LaunchAgent su macOS).
+          source: r.timer.startsWith('saio-') ? 'saio' : 'cron',
+          managed: true,
+          description: p.Description?.[0] || `Timer systemd${userScope ? ' utente' : ''}: ${r.timer}`,
+          nextRunAt: r.next,
+          lastRunAt: r.last,
         })
       }
-      return tasks
-    } catch {
-      return []
     }
+    return tasks
+  }
+
+  /**
+   * `systemctl show` su più unit in una chiamata sola. Restituisce una mappa
+   * unit → proprietà; i valori sono array perché systemd può ripetere la stessa
+   * chiave (es. due `TimersMonotonic` per OnUnitActiveSec + OnBootSec).
+   */
+  private async showUnits(
+    flag: string,
+    units: string[],
+    props: string[],
+  ): Promise<Map<string, Record<string, string[]>>> {
+    const out = new Map<string, Record<string, string[]>>()
+    if (!units.length) return out
+    const args = props.map((p) => `-p ${p}`).join(' ')
+    let stdout = ''
+    try {
+      ;({ stdout } = await execAsync(`systemctl ${flag}show ${units.join(' ')} ${args} --no-pager`, {
+        encoding: 'utf-8',
+      }))
+    } catch {
+      return out
+    }
+    // Blocchi separati da riga vuota, uno per unit; `Id=` identifica l'unit.
+    for (const block of String(stdout).split(/\n\s*\n/)) {
+      const entry: Record<string, string[]> = {}
+      for (const line of block.split(/\r?\n/)) {
+        const eq = line.indexOf('=')
+        if (eq <= 0) continue
+        const key = line.slice(0, eq)
+        const value = line.slice(eq + 1)
+        if (!value) continue
+        ;(entry[key] ??= []).push(value)
+      }
+      const id = entry.Id?.[0]
+      if (id) out.set(id, entry)
+    }
+    return out
   }
 
   async get(name: string): Promise<ScheduledTask | null> {
