@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { VPS_HOSTS, addVpsHost, removeVpsHost, validateVpsInput, getVpsById, type VpsHost } from '../lib/ssh-inventory'
+import { VPS_HOSTS, addVpsHost, removeVpsHost, updateVpsHost, validateVpsInput, getVpsById, type VpsHost } from '../lib/ssh-inventory'
 import { probeVps } from '../lib/ssh-probe'
 import { logger } from '../lib/logger'
 import { vpsConfigStore } from '../lib/vps-config-store'
@@ -56,7 +56,15 @@ export function vpsRouter() {
       const host = VPS_HOSTS.find((h) => h.id === id)
       if (!host) return res.status(404).json({ error: 'VPS not found' })
 
-      const { userLabel, notes } = req.body || {}
+      const { userLabel, notes, keyName } = req.body || {}
+      // Chiave SSH del VPS (scelta da UI): la scrive nell'inventario, così lo stato live
+      // usa la chiave giusta per questo server invece del default.
+      if (keyName !== undefined) {
+        if (typeof keyName !== 'string' || !/^[A-Za-z0-9._-]+$/.test(keyName)) {
+          return res.status(400).json({ error: 'keyName non valido' })
+        }
+        await updateVpsHost(id, { keyName })
+      }
       if (userLabel !== undefined) {
         if (userLabel !== null && typeof userLabel !== 'string') {
           return res.status(400).json({ error: 'userLabel must be string or null' })
@@ -87,7 +95,7 @@ export function vpsRouter() {
   router.get('/:id/stats', async (req, res) => {
     const host = VPS_HOSTS.find((h) => h.id === req.params.id)
     if (!host) return res.status(404).json({ error: 'VPS not found' })
-    const stats = await probeVps(host.id, host.ip)
+    const stats = await probeVps(host.id, host.ip, host.keyName)
     const userCfg = (await vpsConfigStore.get(host.id)) || {}
     res.json({
       ...stats,

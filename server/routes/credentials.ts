@@ -1,130 +1,175 @@
 import { Router } from 'express'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
+import { logger } from '../lib/logger'
+import { atomicWriteFile } from '../lib/atomic-write'
 
-interface CredentialInfo {
+/**
+ * Credenziali di Nicola. Due tipi:
+ *  - "detected": rilevate dal sistema (settings.json → env), SOLO LETTURA.
+ *  - "custom": aggiunte da Nicola dall'interfaccia, EDITABILI, salvate nel data dir
+ *    (`<dataDir>/credentials.json`, FUORI da git, come ssh-inventory.json).
+ * I valori NON vengono mai inviati mascherati/interi nella lista: solo un hint
+ * (ultimi 4 char). Il valore in chiaro si ottiene solo via GET /:id/reveal on-demand.
+ */
+
+interface CustomCred {
+  id: string
   name: string
-  scope: string
-  source: 'settings.json env' | 'Windows env' | 'VPS .env' | 'vault reference' | 'file'
-  configured: boolean
-  notes?: string
+  value: string
+  scope: string     // a che serve
+  project: string   // progetto/servizio di riferimento (libero)
+  createdAt: string
+  updatedAt: string
 }
 
-async function loadSettingsEnv(): Promise<CredentialInfo[]> {
+interface CredView {
+  id: string | null
+  name: string
+  scope: string
+  project: string
+  source: 'settings.json env' | 'custom'
+  editable: boolean
+  configured: boolean
+  hint: string      // es. "••••ab12" (ultimi 4), mai il valore intero
+}
+
+function storePath(dataDir: string): string {
+  return path.join(dataDir, 'credentials.json')
+}
+
+async function loadCustom(dataDir: string): Promise<CustomCred[]> {
+  try {
+    const raw = await fs.readFile(storePath(dataDir), 'utf8')
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed?.credentials) ? parsed.credentials : []
+  } catch {
+    return []
+  }
+}
+
+async function saveCustom(dataDir: string, creds: CustomCred[]): Promise<void> {
+  await atomicWriteFile(storePath(dataDir), JSON.stringify({ credentials: creds }, null, 2))
+  try { fsSync.chmodSync(storePath(dataDir), 0o600) } catch { /* best-effort */ }
+}
+
+/** Ultimi 4 caratteri mascherati — mai il valore intero. */
+function hintOf(value: string): string {
+  if (!value) return ''
+  const tail = value.slice(-4)
+  return `••••${tail}`
+}
+
+// Credenziali auto-rilevate da ~/.claude/settings.json (env). Solo lettura: si
+// modificano da lì, non da SAIO. Le mostriamo per completezza (a che servono).
+const SCOPE_HINTS: Record<string, string> = {
+  GITHUB_TOKEN: 'GitHub · repo/workflow/packages',
+  GITHUB_TOKEN_RM: 'GitHub secondo account',
+  SUPABASE_ACCESS_TOKEN: 'Supabase CLI',
+  OPENAI_API_KEY: 'OpenAI API',
+  ANTHROPIC_API_KEY: 'Anthropic API',
+  N8N_API_KEY: 'n8n workflows API',
+  GROQ_API_KEY: 'Groq (trascrizione whisper)',
+}
+
+async function loadDetected(): Promise<CredView[]> {
   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
   try {
     const raw = await fs.readFile(settingsPath, 'utf8')
-    const parsed = JSON.parse(raw)
-    const env = parsed.env || {}
+    const env = JSON.parse(raw).env || {}
     return Object.keys(env).map((k) => ({
+      id: null,
       name: k,
-      scope: scopeForKey(k),
+      scope: SCOPE_HINTS[k] || k.toLowerCase().replace(/_/g, ' '),
+      project: 'settings.json',
       source: 'settings.json env' as const,
+      editable: false,
       configured: !!env[k],
+      hint: hintOf(String(env[k] || '')),
     }))
   } catch {
     return []
   }
 }
 
-function scopeForKey(key: string): string {
-  const map: Record<string, string> = {
-    GITHUB_TOKEN: 'GitHub · repo + workflow + hooks + packages',
-    GITHUB_TOKEN_RM: 'GitHub secondary account · repo + workflow + read:org',
-    SUPABASE_ACCESS_TOKEN: 'Supabase CLI',
-    GOOGLE_ADS_CLIENT_ID: 'Google Ads OAuth client',
-    GOOGLE_ADS_CLIENT_SECRET: 'Google Ads OAuth secret',
-    GOOGLE_SHEETS_REFRESH_TOKEN: 'Google Sheets + Drive API (CLI tool)',
-    OPENAI_API_KEY: 'OpenAI API (GPT models)',
-    ANTHROPIC_API_KEY: 'Anthropic API (Claude direct)',
-    PADDLE_API_KEY: 'Paddle Billing (Merchant of Record)',
-    PADDLE_WEBHOOK_SECRET: 'Paddle webhook verification',
-    FAL_KEY: 'fal.ai (FLUX / NanaBanana / SD3.5)',
-    RUNWAY_API_KEY: 'Runway Gen-4 video',
-    KLING_API_KEY: 'Kling 3.0 video',
-    ELEVEN_LABS_API_KEY: 'ElevenLabs v3 audio',
-    SUNO_API_KEY: 'Suno music generation',
-    HEYGEN_API_KEY: 'HeyGen avatar videos',
-    NAMECHEAP_API_KEY: 'Namecheap domain purchase',
-    VERCEL_TOKEN: 'Vercel deploy + project mgmt',
-    N8N_API_KEY: 'n8n workflows API',
-    SSH_CLAUDE_VPS: 'SSH key for VPS (loaded from data/ssh-inventory.json)',
-  }
-  return map[key] || key.toLowerCase().replace(/_/g, ' ')
-}
-
-const WINDOWS_ENV_EXPECTED = [
-  'GITHUB_TOKEN_RM',
-  'SUPABASE_ACCESS_TOKEN',
-  'GOOGLE_ADS_CLIENT_ID',
-  'GOOGLE_ADS_CLIENT_SECRET',
-  'GOOGLE_SHEETS_REFRESH_TOKEN',
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'FAL_KEY',
-  'RUNWAY_API_KEY',
-  'ELEVEN_LABS_API_KEY',
-  'KLING_API_KEY',
-  'SUNO_API_KEY',
-  'HEYGEN_API_KEY',
-  'NAMECHEAP_API_KEY',
-  'VERCEL_TOKEN',
-]
-
-// V15.9 WS43.2 — generic placeholders only. Per-installation customization
-// happens via settings.json + .env, never inlined in this file.
-const VAULT_REFERENCES: Array<{ name: string; scope: string; source: CredentialInfo['source'] }> = [
-  { name: 'n8n MCP JWT', scope: 'configured via settings.json mcpServers (no expiry)', source: 'settings.json env' },
-  { name: 'SSH VPS key', scope: 'SSH key configured via data/ssh-inventory.json (gitignored)', source: 'file' },
-  { name: 'Supabase admin secret', scope: 'configured via local secrets folder (gitignored)', source: 'file' },
-  { name: 'Supabase anon key', scope: 'configured via local secrets folder (gitignored)', source: 'file' },
-  { name: 'Supabase service role', scope: 'configured via local secrets folder (gitignored)', source: 'file' },
-  { name: 'MCP bridge token', scope: 'configured via settings.json mcpServers', source: 'settings.json env' },
-]
-
-function loadWindowsEnv(): CredentialInfo[] {
-  return WINDOWS_ENV_EXPECTED.map((name) => ({
-    name,
-    scope: scopeForKey(name),
-    source: 'Windows env' as const,
-    configured: !!process.env[name],
-  }))
-}
-
-export function credentialsRouter() {
+export function credentialsRouter(dataDir: string) {
   const router = Router()
 
+  // Lista completa: rilevate (read-only) + tue custom (editabili). Nessun valore intero.
   router.get('/', async (_req, res) => {
-    const settingsEnv = await loadSettingsEnv()
-    const winEnv = loadWindowsEnv()
-    // Dedup: prefer settings.json source
-    const map = new Map<string, CredentialInfo>()
-    for (const c of [...settingsEnv, ...winEnv]) {
-      const existing = map.get(c.name)
-      if (!existing) {
-        map.set(c.name, c)
-      } else if (!existing.configured && c.configured) {
-        map.set(c.name, c)
-      }
-    }
-    const items: CredentialInfo[] = [...map.values(), ...VAULT_REFERENCES.map((r) => ({
-      name: r.name,
-      scope: r.scope,
-      source: r.source,
-      configured: true,
-    }))]
-    // Sort: configured first, then alpha
-    items.sort((a, b) => {
-      if (a.configured !== b.configured) return a.configured ? -1 : 1
-      return a.name.localeCompare(b.name)
+    const detected = await loadDetected()
+    const custom = await loadCustom(dataDir)
+    const customViews: CredView[] = custom.map((c) => ({
+      id: c.id,
+      name: c.name,
+      scope: c.scope,
+      project: c.project,
+      source: 'custom',
+      editable: true,
+      configured: !!c.value,
+      hint: hintOf(c.value),
+    }))
+    const items = [...customViews, ...detected]
+    res.json({
+      items,
+      stats: { total: items.length, custom: customViews.length, detected: detected.length },
+      updatedAt: new Date().toISOString(),
     })
-    const stats = {
-      total: items.length,
-      configured: items.filter((i) => i.configured).length,
-      missing: items.filter((i) => !i.configured).length,
-    }
-    res.json({ items, stats, updatedAt: new Date().toISOString() })
+  })
+
+  // Aggiungi una credenziale custom
+  router.post('/', async (req, res) => {
+    const name = String(req.body?.name || '').trim()
+    const value = String(req.body?.value ?? '')
+    const scope = String(req.body?.scope || '').trim()
+    const project = String(req.body?.project || '').trim()
+    if (!name || name.length > 100) return res.status(400).json({ error: 'name richiesto (max 100)' })
+    if (!value) return res.status(400).json({ error: 'value richiesto' })
+    const creds = await loadCustom(dataDir)
+    const now = new Date().toISOString()
+    const cred: CustomCred = { id: crypto.randomUUID(), name, value, scope, project, createdAt: now, updatedAt: now }
+    creds.push(cred)
+    await saveCustom(dataDir, creds)
+    logger.info(`[credentials] aggiunta "${name}" (${project || 'no-project'})`)
+    res.json({ ok: true, id: cred.id })
+  })
+
+  // Modifica (name/scope/project sempre; value solo se fornito non vuoto)
+  router.put('/:id', async (req, res) => {
+    const id = String(req.params.id)
+    const creds = await loadCustom(dataDir)
+    const c = creds.find((x) => x.id === id)
+    if (!c) return res.status(404).json({ error: 'not_found' })
+    if (req.body?.name !== undefined) c.name = String(req.body.name).trim().slice(0, 100)
+    if (req.body?.scope !== undefined) c.scope = String(req.body.scope).trim()
+    if (req.body?.project !== undefined) c.project = String(req.body.project).trim()
+    if (req.body?.value !== undefined && String(req.body.value) !== '') c.value = String(req.body.value)
+    c.updatedAt = new Date().toISOString()
+    await saveCustom(dataDir, creds)
+    logger.info(`[credentials] modificata "${c.name}"`)
+    res.json({ ok: true })
+  })
+
+  router.delete('/:id', async (req, res) => {
+    const id = String(req.params.id)
+    const creds = await loadCustom(dataDir)
+    const next = creds.filter((x) => x.id !== id)
+    if (next.length === creds.length) return res.status(404).json({ error: 'not_found' })
+    await saveCustom(dataDir, next)
+    logger.info(`[credentials] eliminata id=${id}`)
+    res.json({ ok: true })
+  })
+
+  // Rivela il valore in chiaro (on-demand: per copiare o modificare). Solo custom.
+  router.get('/:id/reveal', async (req, res) => {
+    const id = String(req.params.id)
+    const creds = await loadCustom(dataDir)
+    const c = creds.find((x) => x.id === id)
+    if (!c) return res.status(404).json({ error: 'not_found' })
+    res.json({ value: c.value })
   })
 
   return router

@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { TokenChart } from '@/components/metrics/TokenChart'
+import { SystemMonitor } from '@/components/metrics/SystemMonitor'
 import { KnowledgeGrowth } from '@/components/metrics/KnowledgeGrowth'
 import { api } from '@/lib/api'
 import { formatRelativeTime } from '@/lib/utils'
@@ -84,6 +85,9 @@ export function MetricsPage() {
         <BarChart3 className="w-6 h-6 text-muted-foreground" />
         <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Metriche & Self-improvement</h1>
       </div>
+
+      {/* Risorse reali del Mac: CPU / RAM / disco */}
+      <SystemMonitor />
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2">

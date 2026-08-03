@@ -259,11 +259,17 @@ function parseProbeOutput(stdout: string, id: string, ip: string): VpsStats {
   return stats
 }
 
-export async function probeVps(id: string, ip: string): Promise<VpsStats> {
+export async function probeVps(id: string, ip: string, keyName?: string): Promise<VpsStats> {
   // Validate IP format strictly
   if (!/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(ip)) {
     return { id, ip, online: false, fetchedAt: new Date().toISOString(), error: 'invalid IP format' }
   }
+
+  // Usa la chiave SSH configurata per QUESTO VPS (host.keyName), non un default globale.
+  // Prima probeVps ignorava keyName e usava sempre ~/.ssh/claude_vps → "Identity file
+  // not accessible" su ogni server. keyName è sanitizzato per evitare path traversal.
+  const safeKey = keyName && /^[A-Za-z0-9._-]+$/.test(keyName) ? keyName : 'claude_vps'
+  const keyPath = path.join(os.homedir(), '.ssh', safeKey)
 
   // Check cache
   const cached = cache.get(id)
@@ -275,7 +281,7 @@ export async function probeVps(id: string, ip: string): Promise<VpsStats> {
     const { stdout } = await execFileAsync(
       'ssh',
       [
-        '-i', SSH_KEY,
+        '-i', keyPath,
         '-o', 'ConnectTimeout=5',
         '-o', 'StrictHostKeyChecking=accept-new',
         '-o', 'BatchMode=yes',

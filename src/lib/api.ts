@@ -367,7 +367,7 @@ export const api = {
           probedAt: string | null
         }>
       }>('/vps'),
-    patch: (id: string, body: { userLabel?: string | null; notes?: string | null }) =>
+    patch: (id: string, body: { userLabel?: string | null; notes?: string | null; keyName?: string }) =>
       request<{
         ok: boolean
         vpsId: string

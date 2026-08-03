@@ -10,11 +10,13 @@
  *   Stream stdout+stderr come text/plain.
  */
 import { Router } from 'express'
+import fsSync from 'node:fs'
 import { spawn } from 'node:child_process'
 import { platform } from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { logger } from '../lib/logger'
+import { TMUX_BIN } from '../lib/tmux-bin'
 
 // V15.0 WS19 — In-memory lock per prevenire doppio install Python deps
 let pythonDepsInstallRunning = false
@@ -174,6 +176,393 @@ async function fileExists(p: string): Promise<boolean> {
 
 export function systemRouter(): Router {
   const router = Router()
+
+  // Sessioni tmux REALI della macchina (Nicola): il contatore "Sessioni" deve riflettere
+  // quello che gira davvero sul Mac, non solo i PTY spawnati da SAIO.
+  router.get('/tmux-sessions', async (_req, res) => {
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+      // Separatore '|': il TAB non sopravvive al passaggio (i campi restavano incollati
+      // e il nome sessione risultava "42_1_1_1784806212_/Users/...").
+      const fmt = '#{session_name}|#{session_windows}|#{?session_attached,1,0}|#{session_created}|#{pane_current_path}'
+      const { stdout } = await execFileAsync(TMUX_BIN, ['list-sessions', '-F', fmt])
+      const sessions = stdout
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const parts = line.split('|')
+          const cwd = parts.slice(4).join('|') || ''
+          // Riconosce i worktree isolati: <progetto>/.claude/worktrees/<worktree>
+          // così una sessione che gira nel worktree resta attribuita al suo progetto.
+          let project: string | null = null
+          let worktree: string | null = null
+          const wtMatch = cwd.match(/^(.*?)\/\.claude\/worktrees\/([^/]+)/)
+          if (wtMatch) {
+            project = wtMatch[1].split('/').filter(Boolean).pop() || null
+            worktree = wtMatch[2]
+          } else {
+            const devMatch = cwd.match(/\/dev\/([^/]+)/)
+            if (devMatch) project = devMatch[1]
+          }
+          return {
+            name: parts[0] || '',
+            windows: Number(parts[1]) || 1,
+            attached: parts[2] === '1',
+            created: Number(parts[3]) || 0,
+            cwd,
+            project,
+            worktree,
+          }
+        })
+        .filter((s) => s.name)
+      res.json({ sessions })
+    } catch {
+      // tmux assente o nessuna sessione: lista vuota, non è un errore
+      res.json({ sessions: [] })
+    }
+  })
+
+  // Risorse di sistema del Mac: CPU, RAM, disco, carico.
+  router.get('/stats', async (_req, res) => {
+    try {
+      const os = await import('node:os')
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+
+      const total = os.totalmem()
+      const free = os.freemem()
+      const cpus = os.cpus()
+      const load = os.loadavg()
+
+      // Disco: su macOS APFS `df /` legge il volume di SISTEMA (read-only) e riporta un
+      // "used" fuorviante (es. 6% con soli 16GB liberi). Usiamo il volume DATI e ricaviamo
+      // l'occupato come total - free, coerente con "Informazioni su questo Mac".
+      let disk = { total: 0, used: 0, free: 0, pct: 0 }
+      try {
+        const target = fsSync.existsSync('/System/Volumes/Data') ? '/System/Volumes/Data' : '/'
+        const { stdout } = await execFileAsync('df', ['-k', target])
+        const line = stdout.trim().split('\n').pop() || ''
+        const p = line.split(/\s+/)
+        const t = Number(p[1]) * 1024
+        const f = Number(p[3]) * 1024
+        const u = Math.max(0, t - f)
+        disk = { total: t, used: u, free: f, pct: t ? Math.round((u / t) * 100) : 0 }
+      } catch { /* df non disponibile */ }
+
+      // RAM: su macOS `os.freemem()` conta SOLO la memoria completamente libera e ignora la
+      // cache file (riutilizzabile all'istante) → "usata" risultava gonfiata (99% invece di 65%).
+      // Usiamo vm_stat come Activity Monitor: usata = active + wired + compressa.
+      let memory: Record<string, number> = {
+        total,
+        free,
+        used: total - free,
+        cached: 0,
+        wired: 0,
+        compressed: 0,
+        pct: total ? Math.round(((total - free) / total) * 100) : 0,
+      }
+      try {
+        const { stdout } = await execFileAsync('vm_stat', [])
+        const pageSize = Number(stdout.match(/page size of (\d+) bytes/)?.[1]) || 4096
+        const pages = (re: RegExp): number => {
+          const m = stdout.match(re)
+          return m ? Number(m[1].replace(/\./g, '')) : 0
+        }
+        const active = pages(/Pages active:\s+([\d.]+)/)
+        const wired = pages(/Pages wired down:\s+([\d.]+)/)
+        const compressed = pages(/Pages occupied by compressor:\s+([\d.]+)/)
+        const fileBacked = pages(/File-backed pages:\s+([\d.]+)/)
+        const speculative = pages(/Pages speculative:\s+([\d.]+)/)
+        const usedBytes = (active + wired + compressed) * pageSize
+        const cachedBytes = (fileBacked + speculative) * pageSize
+        if (usedBytes > 0 && usedBytes <= total) {
+          memory = {
+            total,
+            used: usedBytes,
+            cached: cachedBytes,
+            wired: wired * pageSize,
+            compressed: compressed * pageSize,
+            free: Math.max(0, total - usedBytes),
+            pct: Math.round((usedBytes / total) * 100),
+          }
+        }
+      } catch { /* vm_stat assente (non-macOS): resta il calcolo os.freemem */ }
+
+      res.json({
+        cpu: {
+          cores: cpus.length,
+          model: cpus[0]?.model || '',
+          // load1 / core = occupazione media approssimata
+          loadPct: cpus.length ? Math.min(100, Math.round((load[0] / cpus.length) * 100)) : 0,
+          load: { '1m': load[0], '5m': load[1], '15m': load[2] },
+        },
+        memory,
+        disk,
+        uptime: os.uptime(),
+      })
+    } catch (err) {
+      res.status(500).json({ error: 'stats_failed', message: (err as Error).message })
+    }
+  })
+
+  // Dettaglio risorse: CHI sta occupando RAM/CPU, da quanto e da quale sessione tmux.
+  router.get('/processes', async (req, res) => {
+    const by = String(req.query.by || 'mem') === 'cpu' ? 'cpu' : 'mem'
+    const limit = Math.min(50, Math.max(5, Number(req.query.limit) || 15))
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+
+      const paneToSession = new Map<number, string>()
+      try {
+        const { stdout } = await execFileAsync(TMUX_BIN, [
+          'list-panes', '-a', '-F', '#{session_name}|#{pane_pid}',
+        ])
+        for (const line of stdout.trim().split('\n').filter(Boolean)) {
+          const idx = line.lastIndexOf('|')
+          if (idx > 0) {
+            const s = line.slice(0, idx)
+            const p = Number(line.slice(idx + 1))
+            if (s && p) paneToSession.set(p, s)
+          }
+        }
+      } catch { /* tmux assente */ }
+
+      const { stdout: psOut } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,pcpu=,rss=,etime=,command='])
+      const all: { pid: number; ppid: number; cpu: number; rssKb: number; etime: string; cmd: string }[] = []
+      for (const line of psOut.split('\n')) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.*)$/)
+        if (m) {
+          all.push({
+            pid: Number(m[1]), ppid: Number(m[2]), cpu: Number(m[3]),
+            rssKb: Number(m[4]), etime: m[5], cmd: m[6],
+          })
+        }
+      }
+      const byPid = new Map(all.map((p) => [p.pid, p]))
+      const originSession = (pid: number): string | null => {
+        let cur = byPid.get(pid)
+        for (let i = 0; i < 25 && cur; i++) {
+          const s = paneToSession.get(cur.pid) || paneToSession.get(cur.ppid)
+          if (s) return s
+          cur = byPid.get(cur.ppid)
+        }
+        return null
+      }
+
+      // nome leggibile: ultimo segmento dell'eseguibile, senza path
+      const niceName = (cmd: string): string => {
+        const first = cmd.split(' ')[0] || cmd
+        const base = first.split('/').filter(Boolean).pop() || first
+        // per node/python mostra anche lo script
+        if (/^(node|python\d?|npm|npx|ruby|deno|bun)$/i.test(base)) {
+          const arg = cmd.split(/\s+/).slice(1).find((a) => !a.startsWith('-'))
+          if (arg) return `${base} · ${arg.split('/').filter(Boolean).pop()}`
+        }
+        return base
+      }
+
+      const sorted = [...all].sort((a, b) => (by === 'cpu' ? b.cpu - a.cpu : b.rssKb - a.rssKb)).slice(0, limit)
+      res.json({
+        by,
+        processes: sorted.map((p) => ({
+          pid: p.pid,
+          name: niceName(p.cmd),
+          cpu: p.cpu,
+          memMb: Math.round(p.rssKb / 1024),
+          uptime: p.etime,
+          session: originSession(p.pid),
+          cmd: p.cmd.slice(0, 160),
+        })),
+      })
+    } catch (err) {
+      res.status(500).json({ error: 'processes_failed', message: (err as Error).message })
+    }
+  })
+
+  // Istanze Playwright attive + da quale sessione tmux sono state lanciate.
+  router.get('/playwright', async (_req, res) => {
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+
+      // 1) mappa pane_pid -> sessione tmux
+      const paneToSession = new Map<number, string>()
+      try {
+        const { stdout } = await execFileAsync(TMUX_BIN, [
+          'list-panes', '-a', '-F', '#{session_name}|#{pane_pid}',
+        ])
+        for (const line of stdout.trim().split('\n').filter(Boolean)) {
+          const idx = line.lastIndexOf('|')
+          if (idx > 0) {
+            const sess = line.slice(0, idx)
+            const pid = Number(line.slice(idx + 1))
+            if (sess && pid) paneToSession.set(pid, sess)
+          }
+        }
+      } catch { /* tmux assente */ }
+
+      // 2) tabella processi: pid, ppid, %cpu, rss, elapsed, comando
+      const { stdout: psOut } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,pcpu=,rss=,etime=,command='])
+      const all: { pid: number; ppid: number; cpu: number; rssKb: number; etime: string; cmd: string }[] = []
+      for (const line of psOut.split('\n')) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.*)$/)
+        if (m) {
+          all.push({
+            pid: Number(m[1]), ppid: Number(m[2]), cpu: Number(m[3]),
+            rssKb: Number(m[4]), etime: m[5], cmd: m[6],
+          })
+        }
+      }
+      const byPid = new Map(all.map((p) => [p.pid, p]))
+
+      // 3) risale la catena dei padri finché trova un pane tmux
+      const originSession = (pid: number): string | null => {
+        let cur = byPid.get(pid)
+        for (let i = 0; i < 20 && cur; i++) {
+          const s = paneToSession.get(cur.pid) || paneToSession.get(cur.ppid)
+          if (s) return s
+          cur = byPid.get(cur.ppid)
+        }
+        return null
+      }
+
+      // 4) filtra i processi Playwright (server MCP e browser che ne discendono)
+      const isPwServer = (c: string) => /playwright[-\/]?mcp|@playwright\/mcp|playwright\b.*(run-server|mcp)/i.test(c)
+      const isBrowser = (c: string) => /chrome-mac|Chromium|headless_shell|WebKit\.WebContent|firefox.*marionette/i.test(c)
+
+      const servers = all.filter((p) => isPwServer(p.cmd))
+      const serverPids = new Set(servers.map((s) => s.pid))
+      const descendsFromServer = (p: { pid: number; ppid: number }) => {
+        let cur = byPid.get(p.pid)
+        for (let i = 0; i < 20 && cur; i++) {
+          if (serverPids.has(cur.ppid) || serverPids.has(cur.pid)) return true
+          cur = byPid.get(cur.ppid)
+        }
+        return false
+      }
+      const browsers = all.filter((p) => isBrowser(p.cmd) && descendsFromServer(p))
+
+      const shape = (p: typeof all[number], kind: 'server' | 'browser') => ({
+        pid: p.pid,
+        kind,
+        cpu: p.cpu,
+        memMb: Math.round(p.rssKb / 1024),
+        uptime: p.etime,
+        session: originSession(p.pid),
+        cmd: p.cmd.slice(0, 140),
+      })
+
+      res.json({
+        instances: [...servers.map((p) => shape(p, 'server')), ...browsers.map((p) => shape(p, 'browser'))],
+        counts: { servers: servers.length, browsers: browsers.length },
+      })
+    } catch (err) {
+      res.status(500).json({ error: 'playwright_failed', message: (err as Error).message })
+    }
+  })
+
+  // Termina una singola istanza Playwright per PID.
+  router.delete('/playwright/:pid', async (req, res) => {
+    const pid = Number(req.params.pid)
+    if (!Number.isInteger(pid) || pid <= 1) {
+      res.status(400).json({ error: 'invalid_pid' })
+      return
+    }
+    try {
+      // Sicurezza: killa SOLO se il comando è davvero Playwright
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+      const { stdout } = await execFileAsync('ps', ['-o', 'command=', '-p', String(pid)])
+      const cmd = stdout.trim()
+      if (!/playwright|chrome-mac|Chromium|headless_shell|WebKit\.WebContent/i.test(cmd)) {
+        res.status(403).json({ error: 'not_a_playwright_process' })
+        return
+      }
+      process.kill(pid, 'SIGTERM')
+      res.json({ ok: true, killed: pid })
+    } catch (err) {
+      res.status(500).json({ error: 'kill_failed', message: (err as Error).message })
+    }
+  })
+
+  // Termina UNA singola sessione tmux (non tutte).
+  router.delete('/tmux-sessions/:name', async (req, res) => {
+    const name = String(req.params.name || '')
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      res.status(400).json({ error: 'invalid_session_name' })
+      return
+    }
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+      await execFileAsync(TMUX_BIN, ['kill-session', '-t', `=${name}`])
+      res.json({ ok: true, killed: name })
+    } catch (err) {
+      res.status(500).json({ error: 'kill_failed', message: (err as Error).message })
+    }
+  })
+
+  // Crea una nuova sessione tmux dalla pagina Sessioni (senza passare dalla card progetto).
+  // body: { name, projectId?, startClaude? }
+  //  - projectId → cwd = path del progetto (e il nome di default è quello del progetto)
+  //  - senza projectId → sessione "libera" nella home
+  // Stessa whitelist del kill: il nome finisce in una riga di comando, niente caratteri strani.
+  router.post('/tmux-sessions', async (req, res) => {
+    const name = String(req.body?.name || '').trim()
+    const projectId = req.body?.projectId ? String(req.body.projectId) : null
+    const startClaude = req.body?.startClaude !== false
+
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      res.status(400).json({ error: 'invalid_session_name' })
+      return
+    }
+
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+
+      // Già viva? Non ricreare: il frontend ci si attacca e basta.
+      try {
+        await execFileAsync(TMUX_BIN, ['has-session', '-t', `=${name}`])
+        res.json({ ok: true, name, created: false, alreadyExisted: true })
+        return
+      } catch {
+        /* non esiste → si crea */
+      }
+
+      let cwd = process.env.HOME || '/root'
+      if (projectId) {
+        const { projectsStore } = await import('../lib/projects-store')
+        const project = await projectsStore.findById(projectId)
+        const p = (project as { path?: string } | null)?.path
+        if (!p || !fsSync.existsSync(p)) {
+          res.status(400).json({ error: 'project_dir_missing', path: p || null })
+          return
+        }
+        cwd = p
+      }
+
+      await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', name, '-c', cwd])
+      if (startClaude) {
+        await execFileAsync(TMUX_BIN, ['send-keys', '-t', name, 'claude', 'Enter'])
+      }
+
+      logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ' (+claude)' : ''}`)
+      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude })
+    } catch (err) {
+      res.status(500).json({ error: 'create_failed', message: (err as Error).message })
+    }
+  })
 
   router.get('/deps-check', async (_req, res) => {
     try {

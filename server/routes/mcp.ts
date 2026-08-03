@@ -14,42 +14,50 @@ interface MCPConfig {
 }
 
 async function loadMcpsFromSettings(): Promise<MCPConfig[]> {
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
-  try {
-    const raw = await fs.readFile(settingsPath, 'utf8')
-    const parsed = JSON.parse(raw)
-    const servers = parsed.mcpServers || {}
-    const results: MCPConfig[] = []
-    for (const [name, cfg] of Object.entries<any>(servers)) {
-      const entry: MCPConfig = {
-        name,
-        source: 'settings.json',
-      }
-      if (cfg.type === 'http' && cfg.url) {
-        entry.url = cfg.url
-        entry.transport = 'http'
-      } else if (cfg.command === 'npx' && Array.isArray(cfg.args)) {
-        // Detect streamableHttp supergateway pattern
-        const idx = cfg.args.indexOf('--streamableHttp')
-        if (idx !== -1 && cfg.args[idx + 1]) {
-          entry.url = cfg.args[idx + 1]
-          entry.transport = 'streamableHttp'
-          entry.authBearer = cfg.args.includes('--header')
-        } else {
-          entry.transport = 'stdio-npx'
+  // I server MCP di Claude Code stanno in ~/.claude.json (mcpServers), NON in
+  // ~/.claude/settings.json. Leggiamo entrambi e uniamo (dedup per nome), così
+  // il conteggio riflette i server realmente configurati.
+  const home = os.homedir()
+  const sources = [
+    { path: path.join(home, '.claude.json'), label: '.claude.json' },
+    { path: path.join(home, '.claude', 'settings.json'), label: 'settings.json' },
+  ]
+  const results: MCPConfig[] = []
+  const seen = new Set<string>()
+  for (const src of sources) {
+    try {
+      const raw = await fs.readFile(src.path, 'utf8')
+      const parsed = JSON.parse(raw)
+      const servers = parsed.mcpServers || {}
+      for (const [name, cfg] of Object.entries<any>(servers)) {
+        if (seen.has(name)) continue
+        seen.add(name)
+        const entry: MCPConfig = { name, source: src.label }
+        if (cfg.type === 'http' && cfg.url) {
+          entry.url = cfg.url
+          entry.transport = 'http'
+        } else if (cfg.command === 'npx' && Array.isArray(cfg.args)) {
+          const idx = cfg.args.indexOf('--streamableHttp')
+          if (idx !== -1 && cfg.args[idx + 1]) {
+            entry.url = cfg.args[idx + 1]
+            entry.transport = 'streamableHttp'
+            entry.authBearer = cfg.args.includes('--header')
+          } else {
+            entry.transport = 'stdio-npx'
+            entry.local = true
+            entry.url = cfg.args.slice(0, 3).join(' ') + '...'
+          }
+        } else if (cfg.command) {
+          entry.transport = 'stdio'
           entry.local = true
-          entry.url = cfg.args.slice(0, 3).join(' ') + '...'
         }
-      } else if (cfg.command) {
-        entry.transport = 'stdio'
-        entry.local = true
+        results.push(entry)
       }
-      results.push(entry)
+    } catch {
+      /* file mancante o non parsabile: skip */
     }
-    return results
-  } catch {
-    return []
   }
+  return results
 }
 
 async function probe(target: MCPConfig): Promise<MCPStatus> {

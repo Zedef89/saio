@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Activity, HardDrive, Cpu, MemoryStick, Network, Box, Terminal,
-  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, AlertTriangle, Info, Pencil, Copy, Plus, MoreVertical, Trash2,
+  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, AlertTriangle, Info, Pencil, Copy, Plus, MoreVertical, Trash2, KeyRound,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -81,7 +81,7 @@ function pctColor(pct: number): string {
 }
 
 export function VpsMonitor() {
-  const hostsQ = useQuery({ queryKey: ['vps', 'list'], queryFn: fetchHosts, staleTime: 300_000 })
+  const hostsQ = useQuery({ queryKey: ['vps', 'monitor-list'], queryFn: fetchHosts, staleTime: 300_000 })
   const [showAll, setShowAll] = useState(false)
   const [selectedVpsId, setSelectedVpsId] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false) // V14.28 — wizard
@@ -234,6 +234,30 @@ function VpsCard({ host }: { host: VpsHost }) {
     onError: (e: any) => toast.error('Errore rename', { description: String(e.message || e) }),
   })
 
+  // Selettore chiave SSH del VPS: lo stato live usa questa chiave per connettersi.
+  const [keyModalOpen, setKeyModalOpen] = useState(false)
+  const keysQ = useQuery({
+    queryKey: ['ssh', 'keys'],
+    queryFn: async () => {
+      const res = await fetch('/api/ssh/keys', { credentials: 'include' })
+      if (!res.ok) return { keys: [] as Array<{ name: string; type: string }> }
+      return res.json() as Promise<{ keys: Array<{ name: string; type: string }> }>
+    },
+    enabled: keyModalOpen,
+    staleTime: 300_000,
+  })
+  const keyMut = useMutation({
+    mutationFn: async (keyName: string) => api.vps.patch(host.id, { keyName }),
+    onSuccess: () => {
+      toast.success('Chiave SSH aggiornata')
+      qc.invalidateQueries({ queryKey: ['vps', 'stats', host.id] })
+      qc.invalidateQueries({ queryKey: ['vps', 'infra-list'] })
+      qc.invalidateQueries({ queryKey: ['vps', 'monitor-list'] })
+      setKeyModalOpen(false)
+    },
+    onError: (e: any) => toast.error('Errore chiave', { description: String(e.message || e) }),
+  })
+
   // V14.28 — remove VPS from registry
   const [removeOpen, setRemoveOpen] = useState(false)
   // V14.28 Step 1 — SSH key authorize help dialog
@@ -351,6 +375,9 @@ function VpsCard({ host }: { host: VpsHost }) {
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={openRename} className="gap-2 text-xs">
                   <Pencil className="w-3.5 h-3.5" /> Rinomina etichetta…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setKeyModalOpen(true)} className="gap-2 text-xs">
+                  <KeyRound className="w-3.5 h-3.5" /> Chiave SSH: {host.keyName}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => setRemoveOpen(true)} className="gap-2 text-xs text-red-400 focus:text-red-300">
@@ -598,6 +625,55 @@ function VpsCard({ host }: { host: VpsHost }) {
               Salva etichetta
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Selettore chiave SSH del VPS */}
+      <Dialog open={keyModalOpen} onOpenChange={(o) => !o && setKeyModalOpen(false)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm flex items-center gap-2">
+              <KeyRound className="w-4 h-4" /> Chiave SSH — {displayLabel}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Lo stato live si connette a <code className="font-mono">root@{host.ip}</code> con questa
+              chiave (da <code className="font-mono">~/.ssh/</code>). Attuale:{' '}
+              <code className="font-mono text-primary">{host.keyName}</code>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-72 overflow-auto scrollbar-thin space-y-1 py-1">
+            {keysQ.isLoading && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="w-3 h-3 animate-spin" /> Carico le chiavi...
+              </div>
+            )}
+            {(keysQ.data?.keys || [])
+              .filter((k) => k.type === 'private')
+              .map((k) => {
+                const active = k.name === host.keyName
+                return (
+                  <button
+                    key={k.name}
+                    disabled={keyMut.isPending}
+                    onClick={() => { if (!active) keyMut.mutate(k.name) }}
+                    className={cn(
+                      'w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-xs transition-colors',
+                      active ? 'bg-primary/15 text-primary' : 'hover:bg-accent/50'
+                    )}
+                  >
+                    <KeyRound className="w-3 h-3 shrink-0 opacity-60" />
+                    <span className="font-mono truncate flex-1">{k.name}</span>
+                    {active && <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />}
+                    {keyMut.isPending && keyMut.variables === k.name && (
+                      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                    )}
+                  </button>
+                )
+              })}
+            {keysQ.data && keysQ.data.keys.filter((k) => k.type === 'private').length === 0 && (
+              <p className="text-xs text-muted-foreground">Nessuna chiave privata in ~/.ssh</p>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
 
