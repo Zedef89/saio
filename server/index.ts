@@ -20,11 +20,13 @@ import { archiveRouter } from './routes/archive'
 import { metricsRouter } from './routes/metrics'
 import { mcpRouter } from './routes/mcp'
 import { credentialsRouter } from './routes/credentials'
+import { startSessionBridge } from './lib/session-bridge'
 import { sshRouter } from './routes/ssh'
 import { vpsRouter } from './routes/vps'
 import { mcpDiscoveryRouter } from './routes/mcp-discovery'
 import { deepResearchRouter } from './routes/deep-research'
 import { ptyRouter } from './routes/pty'
+import { worktreesRouter } from './routes/worktrees'
 import { attachPtyWebSocket } from './lib/ws-pty'
 import { ptyManager } from './lib/pty-manager'
 import { projectsStore } from './lib/projects-store'
@@ -242,6 +244,8 @@ app.use('/api/vps', vpsRouter())
 app.use('/api/mcp-discovery', mcpDiscoveryRouter(DATA_DIR))
 app.use('/api/deep-research', deepResearchRouter())
 app.use('/api/pty', ptyRouter())
+// Worktree isolati per utente (istanze condivise): lista, creazione, collisioni
+app.use('/api/worktrees', worktreesRouter(DATA_DIR))
 app.use('/api/recipes', recipesRouter())
 app.use('/api/tools-snapshot', toolsSnapshotRouter())
 app.use('/api/pattern-adoption', patternAdoptionRouter())
@@ -433,6 +437,12 @@ httpServer.on('error', (err: Error) => {
     setTimeout(startListen, LISTEN_RETRY_DELAY_MS)
   })()
 })
+
+// Le sessioni Claude dei due account (~/.claude e ~/.claude-b) non si vedono fra
+// loro: `ListAgents` legge solo il registro del proprio. Il ponte le specchia, così
+// due sessioni sullo stesso repo possono annunciarsi come impone il manuale.
+// Vedi lib/session-bridge.ts.
+startSessionBridge()
 
 startListen()
 
