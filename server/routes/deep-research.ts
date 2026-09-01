@@ -11,6 +11,10 @@ import { resolvePythonExe } from '../lib/python-deps-check'
 const DEEP_SCRIPT = orchestratorScript('spawn_deepresearch.py')
 const DOCS_DIR = path.join(os.homedir(), 'Documents')
 
+function DATA_DIR(): string {
+  return process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+}
+
 const MODES = ['quick', 'standard', 'deep', 'ultradeep'] as const
 type Mode = typeof MODES[number]
 
@@ -39,6 +43,16 @@ export function deepResearchRouter() {
       const slug = slugify(title || query)
       const pyExe = await resolvePythonExe()
 
+      // Sul devbox non c'e' nessun desktop su cui aprire una finestra: la ricerca gira in una
+      // sessione tmux, con le stesse convenzioni della pagina "Sessioni" — proprietario davanti
+      // al nome (lista condivisa) e claude con la modalita' permessi di default di SAIO.
+      const { withOwnerPrefix } = await import('../lib/session-owner')
+      const { withPermissionMode } = await import('../lib/pty-manager')
+      const requester =
+        req.user?.email || (req.headers['cf-access-authenticated-user-email'] as string) || null
+      const sessionName = await withOwnerPrefix(`deepres-${slug}`.slice(0, 60), DATA_DIR(), requester)
+      const claudeCmd = withPermissionMode('claude')
+
       const child = spawn(pyExe, [DEEP_SCRIPT], {
         shell: false,
         windowsHide: true,
@@ -54,6 +68,9 @@ export function deepResearchRouter() {
         query,
         mode: mode || 'standard',
         slug,
+        sessionName,
+        claudeCmd,
+        cwd: os.homedir(),
       }))
       child.stdin.end()
 

@@ -8,6 +8,8 @@ import {
 } from 'lucide-react'
 import { LogDrawer } from '@/components/tasks/LogDrawer'
 import { EmbeddedChat } from '@/components/projects/EmbeddedChat'
+import { WorktreeSelectDialog, type WorktreeChoice } from '@/components/dialogs/WorktreeSelectDialog'
+import { useFeatures } from '@/hooks/useFeatures'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -58,6 +60,11 @@ export function ProjectDetailPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [logOpen, setLogOpen] = useState(false)
+  // Worktree scelto per questa sessione (solo istanze condivise).
+  const [worktree, setWorktree] = useState<WorktreeChoice | null>(null)
+  const [wtDialogOpen, setWtDialogOpen] = useState(false)
+  const { data: features } = useFeatures()
+  const needsWorktree = Boolean(features?.isolatedWorktrees) && !worktree
   const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false)
   const [newFolderInput, setNewFolderInput] = useState('')
   const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false)
@@ -755,12 +762,40 @@ export function ProjectDetailPage() {
         onClose={() => setLogOpen(false)}
       />
 
-      {/* Chat Claude embedded (live PTY via WebSocket) */}
+      {/* Chat Claude embedded (live PTY via WebSocket).
+          Su istanze condivise la sessione non parte finché non si è scelto un worktree
+          isolato: aprirla sulla working copy comune cambierebbe il checkout a chi ci sta
+          già lavorando. Sull'istanza personale la feature è spenta e si apre come sempre. */}
       <Card className="neon-card-purple overflow-hidden">
         <CardContent className="p-0">
-          <EmbeddedChat projectId={p.id} />
+          {needsWorktree ? (
+            <div className="flex flex-col items-center gap-3 py-10 px-6 text-center">
+              <GitBranch className="h-8 w-8 text-muted-foreground" />
+              <div className="text-sm text-muted-foreground max-w-md">
+                Questa è un&apos;istanza condivisa: scegli il worktree in cui lavorare prima di
+                aprire la sessione, così non ti sovrapponi agli altri.
+              </div>
+              <Button onClick={() => setWtDialogOpen(true)}>
+                <GitBranch className="h-4 w-4" />
+                Scegli worktree
+              </Button>
+            </div>
+          ) : (
+            <EmbeddedChat
+              projectId={p.id}
+              worktreePath={worktree?.path || undefined}
+              worktreeLabel={worktree?.label}
+            />
+          )}
         </CardContent>
       </Card>
+
+      <WorktreeSelectDialog
+        open={wtDialogOpen}
+        onOpenChange={setWtDialogOpen}
+        project={p.name}
+        onSelect={(choice) => setWorktree(choice)}
+      />
 
       {/* MOC content embedded */}
       {p.mocPath && (

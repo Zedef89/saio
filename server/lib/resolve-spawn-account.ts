@@ -12,7 +12,13 @@
 import { accountsStore } from './accounts-store'
 import { projectsStore } from './projects-store'
 import { providerRegistry } from './provider-registry'
-import { resolveAccountEnv, buildCliArgsForAccount } from './pty-manager'
+import {
+  resolveAccountEnv,
+  buildCliArgsForAccount,
+  isClaudeCli,
+  resolvePermissionMode,
+  sandboxEnvForBypass,
+} from './pty-manager'
 import { logger } from './logger'
 
 export interface SpawnAccountResolved {
@@ -93,6 +99,11 @@ export async function resolveSpawnAccount(
     ...buildCliArgsForAccount(cliName, { model: model ?? undefined }),
   ]
   const envOverrides = await resolveAccountEnv(account)
+  // buildCliArgsForAccount aggiunge --permission-mode: senza IS_SANDBOX la CLI rifiuterebbe
+  // di partire come root e lo spawner Python fallirebbe subito.
+  if (isClaudeCli(cliName)) {
+    Object.assign(envOverrides, sandboxEnvForBypass(resolvePermissionMode()))
+  }
 
   logger.info(
     `[resolve-spawn] ${projectId}: account=${accountId} cli=${cliName} args=[${cliArgs.join(' ')}] env=[${Object.keys(envOverrides).join(',')}]`

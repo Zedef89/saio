@@ -174,6 +174,11 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
+/** Data dir di SAIO: index.ts la popola all'avvio, come per gli altri moduli che la usano. */
+function DATA_DIR(): string {
+  return process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+}
+
 export function systemRouter(): Router {
   const router = Router()
 
@@ -188,6 +193,12 @@ export function systemRouter(): Router {
       // e il nome sessione risultava "42_1_1_1784806212_/Users/...").
       const fmt = '#{session_name}|#{session_windows}|#{?session_attached,1,0}|#{session_created}|#{pane_current_path}'
       const { stdout } = await execFileAsync(TMUX_BIN, ['list-sessions', '-F', fmt])
+      // Su quale account gira ogni sessione e se sta lavorando: senza questi due dati la
+      // lista non dice ne' quale sessione e' inutile aprire (account a limite finito) ne'
+      // quale sta ancora scrivendo. Non blocca: se fallisce, le card restano come prima.
+      const { sessionRuntimes } = await import('../lib/tmux-runtime')
+      const { knownOwners, ownerFromName } = await import('../lib/session-owner')
+      const [runtimes, owners] = await Promise.all([sessionRuntimes(), knownOwners(DATA_DIR())])
       const sessions = stdout
         .trim()
         .split('\n')
@@ -207,14 +218,19 @@ export function systemRouter(): Router {
             const devMatch = cwd.match(/\/dev\/([^/]+)/)
             if (devMatch) project = devMatch[1]
           }
+          const name = parts[0] || ''
+          const runtime = runtimes[name]
           return {
-            name: parts[0] || '',
+            name,
             windows: Number(parts[1]) || 1,
             attached: parts[2] === '1',
             created: Number(parts[3]) || 0,
             cwd,
             project,
             worktree,
+            account: runtime?.account ?? null,
+            activity: runtime?.activity ?? 'shell',
+            owner: ownerFromName(name, owners),
           }
         })
         .filter((s) => s.name)
@@ -512,19 +528,28 @@ export function systemRouter(): Router {
   })
 
   // Crea una nuova sessione tmux dalla pagina Sessioni (senza passare dalla card progetto).
-  // body: { name, projectId?, startClaude? }
+  // body: { name, projectId?, startClaude?, account? }
   //  - projectId → cwd = path del progetto (e il nome di default è quello del progetto)
   //  - senza projectId → sessione "libera" nella home
+  //  - account → quale abbonamento Claude usare (vedi /claude-accounts); omesso = quello di default
   // Stessa whitelist del kill: il nome finisce in una riga di comando, niente caratteri strani.
   router.post('/tmux-sessions', async (req, res) => {
-    const name = String(req.body?.name || '').trim()
+    const rawName = String(req.body?.name || '').trim()
     const projectId = req.body?.projectId ? String(req.body.projectId) : null
     const startClaude = req.body?.startClaude !== false
+    const accountId = req.body?.account ? String(req.body.account) : null
 
-    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(rawName)) {
       res.status(400).json({ error: 'invalid_session_name' })
       return
     }
+
+    // Chi apre la sessione finisce nel nome (`nicola-komanda-dashboard`): e' l'unico modo per
+    // capire a colpo d'occhio, in una lista condivisa, quali sessioni sono le proprie.
+    const { withOwnerPrefix } = await import('../lib/session-owner')
+    const requester =
+      req.user?.email || (req.headers['cf-access-authenticated-user-email'] as string) || null
+    const name = await withOwnerPrefix(rawName, DATA_DIR(), requester)
 
     try {
       const { execFile } = await import('node:child_process')
@@ -552,15 +577,109 @@ export function systemRouter(): Router {
         cwd = p
       }
 
-      await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', name, '-c', cwd])
-      if (startClaude) {
-        await execFileAsync(TMUX_BIN, ['send-keys', '-t', name, 'claude', 'Enter'])
+      // L'account arriva come id simbolico e viene risolto contro il registro:
+      // nella riga di comando finisce solo una config dir nostra, mai input dell'utente.
+      let claudeCmd = 'claude'
+      let accountLabel = 'default'
+      if (startClaude && accountId) {
+        const { configDirForAccount } = await import('../lib/claude-accounts')
+        const configDir = await configDirForAccount(accountId)
+        if (!configDir) {
+          res.status(400).json({ error: 'unknown_account', account: accountId })
+          return
+        }
+        if (accountId !== 'default') {
+          claudeCmd = `CLAUDE_CONFIG_DIR='${configDir}' claude`
+          accountLabel = accountId
+        }
       }
 
-      logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ' (+claude)' : ''}`)
-      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude })
+      // Stessa modalità permessi delle sessioni aperte dalle card progetto: senza questo
+      // le sessioni create da qui partirebbero col comportamento di default.
+      const { withPermissionMode, resolvePermissionMode } = await import('../lib/pty-manager')
+      claudeCmd = withPermissionMode(claudeCmd)
+
+      await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', name, '-c', cwd])
+      if (startClaude) {
+        await execFileAsync(TMUX_BIN, ['send-keys', '-t', name, claudeCmd, 'Enter'])
+      }
+      if (startClaude) {
+        logger.info(`[tmux] "${name}": claude con perm=${resolvePermissionMode()}`)
+      }
+
+      logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ` (+claude account=${accountLabel})` : ''}`)
+      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })
+    }
+  })
+
+  // Cambia l'account di una sessione gia' aperta portandosi dietro la conversazione: serve
+  // quando un account finisce i token a meta' lavoro. Rifiuta se la sessione sta lavorando,
+  // a meno di ?force=1 — fermare Claude mentre elabora butta via il lavoro in corso.
+  router.post('/tmux-sessions/:name/account', async (req, res) => {
+    const name = String(req.params.name || '')
+    const account = String(req.body?.account || '')
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      res.status(400).json({ error: 'invalid_session_name' })
+      return
+    }
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(account)) {
+      res.status(400).json({ error: 'invalid_account' })
+      return
+    }
+    try {
+      const { switchSessionAccount } = await import('../lib/session-account-switch')
+      const out = await switchSessionAccount(name, account, { force: req.body?.force === true })
+      if (!out.ok) {
+        // `busy` non e' un errore del client: e' uno stato che l'utente puo' forzare.
+        res.status(out.code === 'busy' ? 409 : 400).json({ error: out.code, message: out.message })
+        return
+      }
+      res.json(out)
+    } catch (err) {
+      res.status(500).json({ error: 'switch_failed', message: (err as Error).message })
+    }
+  })
+
+  // Account Claude configurati sul server + quanto resta della finestra token settimanale.
+  // Ordinati dal più libero al più carico: il primo è quello da preselezionare.
+  // ?refresh=1 salta la cache di 60s.
+  router.get('/claude-accounts', async (req, res) => {
+    try {
+      const { listClaudeAccounts } = await import('../lib/claude-accounts')
+      const accounts = await listClaudeAccounts(req.query.refresh === '1')
+      res.json({ accounts, freestId: accounts.find((a) => a.usage)?.id ?? null })
+    } catch (err) {
+      res.status(500).json({ error: 'accounts_failed', message: (err as Error).message })
+    }
+  })
+
+  // Panoramica completa per la pagina Utilizzo: percentuali di ogni finestra (dalla stessa
+  // lettura che alimenta le card sessione, non una in piu' — l'endpoint usage limita per IP) e
+  // token davvero consumati, ricavati dai transcript.
+  // ?refresh=1 forza la rilettura delle percentuali; ?rescan=1 forza anche la scansione dei transcript.
+  router.get('/usage-overview', async (req, res) => {
+    try {
+      const [{ listClaudeAccounts }, { claudeTokenStats }] = await Promise.all([
+        import('../lib/claude-accounts'),
+        import('../lib/claude-usage-stats'),
+      ])
+      const [accounts, tokens] = await Promise.all([
+        listClaudeAccounts(req.query.refresh === '1'),
+        claudeTokenStats(req.query.rescan === '1'),
+      ])
+      res.json({
+        accounts: accounts.map((a) => ({ ...a, tokens: tokens.accounts[a.id] ?? null })),
+        scan: {
+          scanning: tokens.scanning,
+          scannedFiles: tokens.scannedFiles,
+          totalFiles: tokens.totalFiles,
+          updatedAt: tokens.updatedAt,
+        },
+      })
+    } catch (err) {
+      res.status(500).json({ error: 'usage_overview_failed', message: (err as Error).message })
     }
   })
 
@@ -584,6 +703,17 @@ export function systemRouter(): Router {
     } catch (err) {
       res.status(500).json({ error: 'load_failed', message: (err as Error).message })
     }
+  })
+
+  /**
+   * Flag dell'istanza. Servono al frontend per sapere quali funzioni mostrare: i worktree
+   * isolati hanno senso solo sulle installazioni condivise, sull'istanza personale il
+   * selettore sarebbe solo un passaggio in più.
+   */
+  router.get('/features', (_req, res) => {
+    res.json({
+      isolatedWorktrees: process.env.SAIO_ISOLATED_WORKTREES === 'true',
+    })
   })
 
   // V15.0 WS11 — Cloudflare tunnel status (per wizard)

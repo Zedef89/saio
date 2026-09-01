@@ -49,6 +49,15 @@ function parseSpawnOptions(rawUrl: string): SpawnOptions {
     const accountId = params.get('accountId')
     if (accountId && /^[a-zA-Z0-9_-]{1,64}$/.test(accountId)) opts.accountId = accountId
 
+    // Worktree scelto dall'utente nel selettore. `worktreePath` è un path assoluto e viene
+    // validato lato pty-manager (deve esistere); qui basta escludere caratteri da shell,
+    // visto che finisce in una riga di comando tmux.
+    const wtLabel = params.get('worktreeLabel')
+    if (wtLabel && /^[a-zA-Z0-9._-]{1,40}$/.test(wtLabel)) opts.worktreeLabel = wtLabel
+
+    const wtPath = params.get('worktreePath')
+    if (wtPath && /^\/[a-zA-Z0-9._\-/]{1,200}$/.test(wtPath)) opts.worktreePath = wtPath
+
     const vpsId = params.get('vpsId')
     const cliName = params.get('cliName')
     if (
@@ -96,30 +105,43 @@ function parseCookies(header: string | undefined): Record<string, string> {
  * aperto a chiunque raggiunga il tunnel. Il browser same-origin invia già i cookie di
  * sessione nell'handshake; un client senza cookie/CF-Access valido viene rifiutato.
  */
-async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promise<boolean> {
+/**
+ * Esito dell'auth sull'upgrade. L'email non serve solo a loggare: su un'istanza condivisa
+ * determina in quale worktree isolato nasce la sessione e con quale identità git si pusha,
+ * quindi va propagata fino allo spawn invece di essere scartata.
+ */
+interface UpgradeAuth {
+  ok: boolean
+  email?: string
+}
+
+async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promise<UpgradeAuth> {
   // Master switch dev: bypassa tutto
-  if (!isAuthRequired()) return true
+  if (!isAuthRequired()) return { ok: true }
   // Desktop remote-only: la webview LOCALE entra senza login; il tunnel deve autenticarsi.
-  if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req)) return true
+  if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req)) return { ok: true }
   // SSO via Cloudflare Access: header iniettato dall'edge dopo verifica identità.
   const cfEmailHeader = req.headers['cf-access-authenticated-user-email']
   const ownerEmail = (process.env.DASHBOARD_OWNER_EMAIL || '').trim().toLowerCase()
   if (typeof cfEmailHeader === 'string' && ownerEmail && cfEmailHeader.trim().toLowerCase() === ownerEmail) {
-    return true
+    return { ok: true, email: cfEmailHeader.trim().toLowerCase() }
   }
   const cookies = parseCookies(req.headers.cookie)
   // Trusted device cookie (long-lived) prima, poi access token.
   const trusted = cookies[COOKIE_TRUSTED]
   if (trusted) {
     const tp = await verifyTrusted(dataDir, trusted)
-    if (tp && !(await isSessionRevoked(dataDir, tp.sid))) return true
+    if (tp && !(await isSessionRevoked(dataDir, tp.sid))) return { ok: true, email: tp.sub }
   }
   const at = cookies[COOKIE_ACCESS]
   if (at) {
     const payload = await verifyAccess(dataDir, at)
-    if (payload && !(await isSessionRevoked(dataDir, payload.sid))) return true
+    if (payload && !(await isSessionRevoked(dataDir, payload.sid))) return { ok: true, email: payload.sub }
   }
-  return false
+  // Nessun ramo "basta Cloudflare Access": un guest revocato da SAIO resterebbe nella policy
+  // Access e potrebbe riaprire un PTY. Il revoke deve chiudere tutto subito, quindi per i
+  // guest serve sempre un cookie di sessione valido.
+  return { ok: false }
 }
 
 export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
@@ -140,7 +162,8 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
           socket.destroy()
           return
         }
-        if (!(await authenticateUpgrade(req, dataDir))) {
+        const auth = await authenticateUpgrade(req, dataDir)
+        if (!auth.ok) {
           logger.warn(`[ws] rejected unauthenticated upgrade from ${req.socket?.remoteAddress}`)
           socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
           socket.destroy()
@@ -148,6 +171,8 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
         }
         const projectId = match[1]
         const spawnOpts = parseSpawnOptions(url)
+        // Identità di chi apre la sessione: decide worktree isolato e credenziali git.
+        if (auth.email) spawnOpts.userEmail = auth.email
         if (Object.keys(spawnOpts).length > 0) {
           logger.info(`[ws-pty] ${projectId} spawn opts from query: ${JSON.stringify(spawnOpts)}`)
         }

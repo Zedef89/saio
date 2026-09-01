@@ -13,7 +13,7 @@ import { logger } from '../lib/logger'
 const UPLOAD_ROOT = process.env.SAIO_UPLOAD_DIR || path.join(os.homedir(), 'SAIO-uploads')
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: audio lunghi e PDF pesanti
 
-// Whitelist: immagini, documenti, audio, testo/codice
+// Whitelist: immagini, documenti, audio, testo/codice, archivi zip
 const ALLOWED_MIME = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/heic', 'image/heif', 'image/svg+xml',
   'application/pdf',
@@ -25,7 +25,16 @@ const ALLOWED_MIME = new Set([
   'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
   'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/flac',
   'video/webm', 'video/mp4', 'video/quicktime',
+  'application/zip', 'application/x-zip-compressed', 'multipart/x-zip', 'application/x-zip',
 ])
+
+/**
+ * Estensioni ammesse anche quando il browser manda un MIME generico.
+ * Safari/iOS e alcuni file manager marcano gli zip come `application/octet-stream`:
+ * senza questo fallback l'export di una chat verrebbe rifiutato.
+ */
+const ALLOWED_EXT_FALLBACK = new Set(['.zip'])
+const GENERIC_MIME = new Set(['application/octet-stream', 'application/x-compressed', ''])
 
 function sanitizeName(name: string): string {
   return (
@@ -76,7 +85,9 @@ export function uploadsRouter(): Router {
     }),
     limits: { fileSize: MAX_FILE_SIZE, files: 5 },
     fileFilter: (_req, file, cb) => {
-      if (!ALLOWED_MIME.has(file.mimetype)) {
+      const ext = path.extname(file.originalname || '').toLowerCase()
+      const okByExt = ALLOWED_EXT_FALLBACK.has(ext) && GENERIC_MIME.has(file.mimetype)
+      if (!ALLOWED_MIME.has(file.mimetype) && !okByExt) {
         return cb(new Error(`Tipo di file non consentito: ${file.mimetype}`))
       }
       cb(null, true)

@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-DeepResearch Spawner — opens a new CMD window with Claude in plan mode,
-pre-loaded with /deep-research <query> --mode=<mode>.
+DeepResearch Spawner — apre una sessione Claude gia' innescata con
+/deep-research <query> --mode=<mode>.
 
-Receives JSON payload via stdin, outputs spawn result as JSON to stdout.
+Su Windows la sessione e' una nuova finestra CMD; su Linux/macOS (dove SAIO gira
+headless sul devbox e non esiste nessun desktop su cui aprire una finestra) e'
+una sessione tmux staccata, la stessa che la pagina "Sessioni" sa elencare e a
+cui si puo' attaccare dal browser.
+
+Riceve il payload JSON su stdin, scrive il risultato JSON su stdout.
 """
 
 import json
+import shlex
+import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 import logging
 
@@ -22,6 +30,10 @@ log = logging.getLogger(__name__)
 
 CREATE_NEW_CONSOLE = 0x00000010
 
+# Stesso ordine di candidati di server/lib/tmux-bin.ts: il PATH della GUI di macOS
+# non include /opt/homebrew, su Linux tmux sta in /usr/bin.
+TMUX_CANDIDATES = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux", "/bin/tmux"]
+
 
 def _clean(s: str) -> str:
     return (
@@ -31,6 +43,56 @@ def _clean(s: str) -> str:
     )
 
 
+def _tmux_bin() -> str:
+    for p in TMUX_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return shutil.which("tmux") or "tmux"
+
+
+def _tmux_has_session(tmux: str, name: str) -> bool:
+    return subprocess.run(
+        [tmux, "has-session", "-t", f"={name}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def _free_session_name(tmux: str, base: str) -> str:
+    """Nome libero: se la ricerca sullo stesso topic e' gia' aperta non ci si scrive dentro."""
+    if not _tmux_has_session(tmux, base):
+        return base
+    return f"{base}-{datetime.now().strftime('%H%M%S')}"
+
+
+def _spawn_tmux(session_name: str, claude_cmd: str, cwd: str, kickoff_msg: str) -> dict:
+    """Sessione tmux staccata + claude gia' avviato col prompt di kickoff."""
+    tmux = _tmux_bin()
+    if not Path(tmux).exists() and not shutil.which("tmux"):
+        raise RuntimeError("tmux non trovato: serve per aprire la sessione di ricerca")
+
+    name = _free_session_name(tmux, session_name)
+    subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", cwd], check=True)
+    # Il prompt viene passato come argomento di claude: cosi' la ricerca parte da sola,
+    # senza che qualcuno debba incollarlo a mano nella sessione.
+    subprocess.run(
+        [tmux, "send-keys", "-t", name, f"{claude_cmd} {shlex.quote(kickoff_msg)}", "Enter"],
+        check=True,
+    )
+
+    pid = 0
+    try:
+        out = subprocess.run(
+            [tmux, "display-message", "-p", "-t", name, "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        pid = int(out) if out.isdigit() else 0
+    except Exception:
+        pass
+
+    log.info(f"sessione tmux '{name}' creata in {cwd}")
+    return {"name": name, "pid": pid}
+
+
 def main() -> int:
     raw = sys.stdin.read()
     payload = json.loads(raw)
@@ -38,6 +100,11 @@ def main() -> int:
     query = payload.get("query", "")
     mode = payload.get("mode", "standard")
     slug = payload.get("slug", "research")
+    # Passati dalla route: nome sessione col prefisso del proprietario e comando claude
+    # gia' completo di modalita' permessi. Se mancano si usano i default.
+    session_name = payload.get("sessionName") or f"deepres-{slug[:40]}"
+    claude_cmd = payload.get("claudeCmd") or "claude"
+    cwd = payload.get("cwd") or str(Path.home())
 
     if not query or len(query) < 3:
         print(json.dumps({"spawned": False, "error": "query required"}))
@@ -73,16 +140,31 @@ def main() -> int:
     )
 
     try:
-        proc = subprocess.Popen(
-            ["cmd.exe", "/k", cmd_inner],
-            shell=False,
-            creationflags=CREATE_NEW_CONSOLE,
-        )
-        time.sleep(0.3)
+        if sys.platform == "win32":
+            proc = subprocess.Popen(
+                ["cmd.exe", "/k", cmd_inner],
+                shell=False,
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+            time.sleep(0.3)
+            print(json.dumps({
+                "spawned": True,
+                "pid": proc.pid,
+                "terminalTitle": terminal_title,
+                "kickoffMessage": kickoff_msg,
+            }))
+            return 0
+
+        # Linux/macOS: nessuna console da aprire, la sessione vive in tmux.
+        if not Path(cwd).is_dir():
+            cwd = str(Path.home())
+        res = _spawn_tmux(session_name, claude_cmd, cwd, kickoff_msg)
         print(json.dumps({
             "spawned": True,
-            "pid": proc.pid,
-            "terminalTitle": terminal_title,
+            "pid": res["pid"],
+            "terminalTitle": res["name"],
+            "tmuxSession": res["name"],
+            "cwd": cwd,
             "kickoffMessage": kickoff_msg,
         }))
         return 0

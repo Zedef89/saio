@@ -56,8 +56,12 @@ export function DeepResearchPage() {
     },
     onSuccess: (d: any) => {
       if (d.spawned) {
+        // Su Linux/macOS la ricerca gira in una sessione tmux gia' innescata col prompt: non
+        // c'e' nessuna finestra che si apre davanti e niente da digitare, si va in Sessioni.
         toast.success('Deep research avviato', {
-          description: `Finestra "${d.terminalTitle}" aperta — digita ${d.kickoffMessage ? 'il prompt' : '/deep-research ...'} dentro Claude`,
+          description: d.tmuxSession
+            ? `Sessione "${d.tmuxSession}" aperta — la ricerca è già partita, la segui da Sessioni`
+            : `Finestra "${d.terminalTitle}" aperta — digita ${d.kickoffMessage ? 'il prompt' : '/deep-research ...'} dentro Claude`,
           duration: 8000,
         })
       } else {

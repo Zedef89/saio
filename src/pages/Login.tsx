@@ -10,6 +10,7 @@ import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useClaimStatus } from '@/hooks/useClaimStatus'
+import { useMe } from '@/hooks/useAuth'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,17 +25,26 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const { data: status, isLoading, isError, refetch } = useClaimStatus()
+  const me = useMe()
   const { t } = useTranslation(['auth', 'common'])
 
   // V15.9 WS43 — splash "Starting backend" durante il cold-start del sidecar Tauri
   // (Express può richiedere 2-5s per bind :3031). useClaimStatus ora ha retry 10×.
-  if (isLoading) {
+  if (isLoading || me.isLoading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-background gap-4">
         <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin" />
         <div className="text-muted-foreground text-sm">{t('common:app.starting_backend')}</div>
       </div>
     )
+  }
+
+  // Già autenticato → non mostrare il form. Serve quando la sessione è validata a monte
+  // (Cloudflare Access inietta Cf-Access-Authenticated-User-Email) o il cookie è ancora
+  // valido: senza questo si restava parcheggiati su /login dopo un 401 vecchio, con un
+  // secondo login apparente che il backend non stava affatto chiedendo.
+  if (me.data) {
+    return <Navigate to="/" replace />
   }
 
   // Solo dopo 10 retry falliti mostriamo l'errore esplicito.

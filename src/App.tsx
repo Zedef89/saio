@@ -12,6 +12,7 @@ import { ProjectDetailPage } from '@/pages/ProjectDetail'
 import { NewProjectPage } from '@/pages/NewProject'
 import { DeepResearchPage } from '@/pages/DeepResearch'
 import { AccountsPage } from '@/pages/Accounts'
+import { UsagePage } from '@/pages/Usage'
 import { TaskTypesPage } from '@/pages/TaskTypes'
 import { ExtrasPage } from '@/pages/Extras'
 import { CronPage } from '@/pages/Cron'
@@ -63,6 +64,7 @@ export default function App() {
           <Route index element={<Navigate to="/sessions" replace />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="chats" element={<ChatsPage />} />
+          <Route path="usage" element={<UsagePage />} />
           <Route path="memories" element={<MemoriesPage />} />
           <Route path="infrastructure" element={<InfrastructurePage />} />
           <Route path="inbox" element={<InboxPage />} />

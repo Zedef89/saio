@@ -43,6 +43,7 @@
  * nessuno legge più — meglio tornare al problema noto che crearne uno nuovo.
  */
 import fs from 'node:fs/promises'
+import { readdirSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { logger } from './logger'
@@ -52,15 +53,24 @@ const INTERVALLO_MS = 5_000
 const MARCATORE = '.saio-mirror'
 
 /**
- * Le cartelle dei REGISTRI di sessione dei due account — non le config dir.
+ * Le cartelle dei REGISTRI di sessione di tutti gli account — non le config dir.
  * La differenza non e' cosmetica: puntando alla config dir si finisce a leggere
  * `.credentials.json` e `.claude.json`, che non sono schede di sessione. Al primo avvio e'
  * successo, e la guardia sul formato ha spento il ponte invece di copiare file a caso.
  */
-const REGISTRI = [
-  path.join(HOME, '.claude', 'sessions'),
-  path.join(HOME, '.claude-b', 'sessions'),
-]
+function configDirs(): string[] {
+  const dirs = [path.join(HOME, '.claude')]
+  try {
+    for (const entry of readdirSync(HOME, { withFileTypes: true })) {
+      if (entry.isDirectory() && /^\.claude-[a-zA-Z0-9_-]+$/.test(entry.name)) dirs.push(path.join(HOME, entry.name))
+    }
+  } catch {
+    /* home illeggibile: resta il solo account di default */
+  }
+  return dirs.sort()
+}
+
+const REGISTRI = configDirs().map((dir) => path.join(dir, 'sessions'))
 
 let attivo = false
 let spentoPerFormato = false

@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { execFile, spawn as childSpawn } from 'node:child_process'
+import { execFile, spawn as childSpawn, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import { TMUX_BIN } from './tmux-bin'
 import { logger } from './logger'
@@ -129,6 +129,34 @@ async function isLocalCliInstalled(cliName: string): Promise<boolean> {
 // Resolve Claude Code slug from a cwd path. Claude transforms cwd → slug by
 // replacing each non-alphanumeric char with '-' (no collapse, no prepend).
 // Example: "C:\Users\info\Desktop\CLAUDE WORLD" → "C--Users-info-Desktop-CLAUDE-WORLD"
+/**
+ * Nome della sessione tmux di un utente su un progetto: `<slug>-<progetto>`.
+ *
+ * Il proprietario sta davanti perche' la lista sessioni e' condivisa fra piu' persone: col
+ * prefisso le sessioni di ognuno restano in colonna e si raggruppano da sole. Se esiste ancora
+ * una sessione col vecchio schema (`<progetto>-<slug>`, suffisso) la si riusa: rinominarla
+ * significherebbe abbandonare una sessione viva e ricrearne una vuota accanto.
+ */
+export function sessionNameFor(slug: string, projectName: string): string {
+  const legacy = `${projectName}-${slug}`
+  try {
+    if (tmuxHasSessionSync(legacy)) return legacy
+  } catch {
+    /* tmux non raggiungibile: si usa comunque il nome nuovo */
+  }
+  return `${slug}-${projectName}`
+}
+
+/** `tmux has-session` sincrono: serve dentro la costruzione del nome, prima dello spawn. */
+function tmuxHasSessionSync(name: string): boolean {
+  try {
+    execFileSync(TMUX_BIN, ['has-session', '-t', `=${name}`], { stdio: 'ignore', timeout: 3000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function claudeSlugFromCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-|-$/g, '')
 }
@@ -248,7 +276,14 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\r\n/g, '\n')
 }
 
-const MAX_SESSIONS = 6
+/**
+ * Nessun tetto alle sessioni PTY: il vecchio 6 era tarato su un Mac con un solo utente e su
+ * una devbox condivisa lo si toccava subito, dopodiche' OGNI nuova sessione veniva rifiutata
+ * per qualunque progetto — e nella UI appariva solo "SESSIONE TERMINATA", senza dire perche'.
+ * Un tetto si puo' rimettere con SAIO_MAX_PTY_SESSIONS; senza la variabile non c'e' limite.
+ * Le sessioni inattive restano comunque chiuse da IDLE_TIMEOUT_MS.
+ */
+const MAX_SESSIONS = Number(process.env.SAIO_MAX_PTY_SESSIONS) || Infinity
 const IDLE_TIMEOUT_MS = 60 * 60_000 // 1 hour
 const MAX_BUFFER_PER_SESSION = 1_000_000 // 1MB scrollback
 const RECENT_TAIL_BYTES = 8192 // V15.0 WS30B: rolling output window per crash detection
@@ -314,6 +349,16 @@ export interface SpawnOptions {
   taskType?: string
   // V13: per-spawn environment overrides (sec: only for whitelisted env var NAMES referenced by accounts)
   extraEnv?: Record<string, string>
+  /**
+   * Email di chi apre la sessione. Su istanze condivise decide il worktree isolato e
+   * l'identità git con cui si committa: senza, tutti finirebbero nella stessa working copy
+   * e pusherebbero con le credenziali del proprietario della macchina.
+   */
+  userEmail?: string
+  /** Etichetta del worktree da usare/creare. Default 'work'. */
+  worktreeLabel?: string
+  /** Path esplicito di un worktree già esistente scelto dall'utente. */
+  worktreePath?: string
 }
 
 export interface RemoteSpawnTarget {
@@ -345,21 +390,86 @@ export function buildRemoteSshCommand(target: RemoteSpawnTarget): string {
 }
 
 /**
+ * Modalità permessi con cui partono le sessioni Claude aperte da SAIO quando il
+ * chiamante non ne impone una: su questa devbox il classificatore di `auto` blocca
+ * troppo lavoro normale, quindi il default è `bypassPermissions`.
+ *
+ * Non tocca nessun `settings.json`: il flag viene passato allo spawn, quindi vale solo
+ * per le sessioni lanciate da SAIO e non per un `claude` avviato a mano dal terminale.
+ * Si riporta al comportamento standard con `SAIO_DEFAULT_PERMISSION_MODE=default`.
+ */
+const DEFAULT_CLAUDE_PERMISSION_MODE = process.env.SAIO_DEFAULT_PERMISSION_MODE || 'bypassPermissions'
+
+/** `claude`, `claude-b`, `claude-c`: wrapper diversi di `CLAUDE_CONFIG_DIR`, stessa CLI e stessi flag. */
+export function isClaudeCli(cliName: string): boolean {
+  return /^claude(-[a-zA-Z0-9_-]+)?$/.test(cliName)
+}
+
+/** Modalità esplicita del chiamante se c'è, altrimenti il default di SAIO. */
+export function resolvePermissionMode(permissionMode?: string): string {
+  return permissionMode && permissionMode !== 'default'
+    ? permissionMode
+    : DEFAULT_CLAUDE_PERMISSION_MODE
+}
+
+/**
+ * Claude Code rifiuta `bypassPermissions` quando gira come root ("cannot be used with
+ * root/sudo privileges") e SAIO gira come root: senza questa variabile la sessione non
+ * parte proprio. `IS_SANDBOX=1` è l'escape hatch previsto dalla CLI per gli ambienti
+ * containerizzati. Vale solo per i processi che SAIO lancia in locale.
+ */
+export function sandboxEnvForBypass(permissionMode: string): Record<string, string> {
+  return permissionMode === 'bypassPermissions' && process.getuid?.() === 0
+    ? { IS_SANDBOX: '1' }
+    : {}
+}
+
+/**
+ * Applica modalità permessi + IS_SANDBOX a un comando `claude` già composto, anche quando ha
+ * davanti delle env (`CLAUDE_CONFIG_DIR='…' claude`) o dietro degli argomenti (`--resume <id>`).
+ *
+ * Serve ai punti di spawn che costruiscono la riga di comando a mano invece di passare da
+ * buildCliArgsForAccount: la pagina Sessioni (routes/system.ts) e il cambio account a sessione
+ * aperta (session-account-switch.ts). Senza, quelle sessioni partono senza flag.
+ */
+export function withPermissionMode(cmd: string, permissionMode?: string): string {
+  const mode = resolvePermissionMode(permissionMode)
+  if (mode === 'default') return cmd
+  // L'env inline: una sessione tmux nuova non eredita l'env del PTY se il server tmux gira già.
+  const prefix = Object.entries(sandboxEnvForBypass(mode))
+    .map(([k, v]) => `${k}=${v} `)
+    .join('')
+  return `${prefix}${cmd} --permission-mode ${mode}`
+}
+
+/** `claude --permission-mode <mode>` già pronto, per i punti di spawn che non passano da buildCliArgsForAccount. */
+export function claudeCommandWithPermissionMode(cliName: string, permissionMode?: string): string {
+  return withPermissionMode(cliName, permissionMode)
+}
+
+/**
  * V13: Build args for a CLI based on account mode + model + permissionMode.
  * Handles different arg conventions across Claude, Codex, Gemini, aichat.
  */
 export function buildCliArgsForAccount(
   cliName: string,
-  opts: { model?: string; permissionMode?: string; resume?: boolean }
+  opts: {
+    model?: string
+    permissionMode?: string
+    resume?: boolean
+    /**
+     * Se false, il default di SAIO non si applica e passa solo la modalità chiesta dal
+     * chiamante. Lo usa lo spawn remoto: sui VPS gira un altro root, dove `bypassPermissions`
+     * verrebbe rifiutato all'avvio, e non è questa la macchina di cui stiamo decidendo i permessi.
+     */
+    useDefaultPermissionMode?: boolean
+  }
 ): string[] {
   const args: string[] = []
   switch (cliName) {
     case 'claude':
       if (opts.resume) args.push('--continue')
       if (opts.model) args.push('--model', opts.model)
-      if (opts.permissionMode && opts.permissionMode !== 'default') {
-        args.push('--permission-mode', opts.permissionMode)
-      }
       break
     case 'codex':
       // @openai/codex args: --model <id>
@@ -376,6 +486,13 @@ export function buildCliArgsForAccount(
     // Other CLIs: pass model verbatim
     default:
       if (opts.model) args.push('--model', opts.model)
+  }
+  // Fuori dallo switch: il flag vale per tutti i wrapper della famiglia claude
+  // (`claude-b`/`claude-c` cadono nel default case, che gestisce solo --model).
+  if (isClaudeCli(cliName)) {
+    const explicit = opts.permissionMode && opts.permissionMode !== 'default' ? opts.permissionMode : 'default'
+    const mode = opts.useDefaultPermissionMode === false ? explicit : resolvePermissionMode(opts.permissionMode)
+    if (mode !== 'default') args.push('--permission-mode', mode)
   }
   return args
 }
@@ -484,6 +601,67 @@ class PtyManager {
   }
 
   /**
+   * Worktree isolato per l'utente che apre la sessione: ritorna la directory in cui far
+   * partire tmux e il nome della sessione (`<progetto>-<slug>`, come richiesto per capire a
+   * colpo d'occhio di chi è).
+   *
+   * Non fallisce mai in modo bloccante: se il progetto non è un repo git o `git worktree add`
+   * va storto, si torna alla working copy diretta con un warning. Meglio una sessione senza
+   * isolamento che nessuna sessione.
+   */
+  private async resolveWorktree(
+    repoDir: string,
+    projectName: string,
+    opts: SpawnOptions
+  ): Promise<{ dir: string; session: string } | null> {
+    try {
+      const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles } = await import('./worktree')
+      if (!(await isGitRepo(repoDir))) {
+        logger.info(`[pty] ${projectName}: non è un repo git → worktree isolato saltato`)
+        return null
+      }
+      // index.ts popola DASHBOARD_DATA_DIR all'avvio: stesso pattern di ssh-inventory.
+      const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+      const identity = await getIdentity(dataDir, opts.userEmail!)
+
+      // Worktree scelto esplicitamente dalla UI fra quelli esistenti.
+      if (opts.worktreePath && fs.existsSync(opts.worktreePath)) {
+        await this.warnOverlaps(overlappingFiles, repoDir, opts.worktreePath, projectName)
+        return { dir: opts.worktreePath, session: sessionNameFor(identity.slug, projectName) }
+      }
+
+      const wt = await ensureWorktree(repoDir, identity, { label: opts.worktreeLabel })
+      if ('error' in wt) {
+        logger.warn(`[pty] ${projectName}: worktree non creato (${wt.error}) → uso la working copy`)
+        return null
+      }
+      for (const w of wt.warnings) logger.warn(`[pty] ${projectName}: ${w}`)
+      await this.warnOverlaps(overlappingFiles, repoDir, wt.path, projectName)
+      return { dir: wt.path, session: sessionNameFor(identity.slug, projectName) }
+    } catch (err) {
+      logger.warn(`[pty] ${projectName}: risoluzione worktree fallita: ${String(err).slice(0, 200)}`)
+      return null
+    }
+  }
+
+  /** Segnala a log i file che altri stanno già modificando nello stesso repo. */
+  private async warnOverlaps(
+    overlappingFiles: (repoDir: string, mine: string) => Promise<{ worktree: string; owner: string; files: string[] }[]>,
+    repoDir: string,
+    minePath: string,
+    projectName: string
+  ): Promise<void> {
+    try {
+      const overlaps = await overlappingFiles(repoDir, minePath)
+      for (const o of overlaps) {
+        logger.info(`[pty] ${projectName}: ${o.owner} sta modificando ${o.files.length} file in ${o.worktree}`)
+      }
+    } catch {
+      /* diagnostica: non deve impedire l'apertura della sessione */
+    }
+  }
+
+  /**
    * getOrCreate — returns existing or spawns new PTY session.
    * V13: Async to allow accountId resolution (reads accounts-store).
    * If accountId is set, uses account's CLI/env for spawn. Otherwise defaults to 'claude' local.
@@ -506,7 +684,11 @@ class PtyManager {
       }
     }
     if (this.sessions.size >= MAX_SESSIONS) {
-      return { error: `max sessions reached (${MAX_SESSIONS}) — chiudi altre prima di aprirne di nuove` }
+      // Va loggato: senza questa riga il rifiuto era invisibile lato server e nella UI
+      // restava solo un "SESSIONE TERMINATA" indistinguibile da un crash vero.
+      const aperte = [...this.sessions.keys()].join(', ')
+      logger.warn(`[pty] ${projectId}: rifiutata, ${this.sessions.size}/${MAX_SESSIONS} sessioni PTY gia' aperte (${aperte})`)
+      return { error: `Limite di ${MAX_SESSIONS} sessioni PTY raggiunto: chiudine una prima di aprirne un'altra. Aperte: ${aperte}` }
     }
 
     const cwd = opts.cwd || this.workspaceDirFor(projectId)
@@ -617,10 +799,24 @@ class PtyManager {
       tmuxSession = __sess
       logger.info(`[pty] ${projectId}: attach diretto a sessione tmux "${__sess}"`)
     } else if (__tmuxName) {
-      const __dir = path.join(os.homedir(), 'dev', __tmuxName)
-      effectiveCmd = `if ${TMUX_BIN} has-session -t ${__tmuxName} 2>/dev/null; then :; else ${TMUX_BIN} new-session -d -s ${__tmuxName} -c ${__dir}; ${TMUX_BIN} send-keys -t ${__tmuxName} claude Enter; fi; exec ${TMUX_BIN} attach -t ${__tmuxName}`
-      tmuxSession = __tmuxName
-      logger.info(`[pty] ${projectId}: card→tmux ${__tmuxName} (cwd ${__dir})`)
+      // Su istanze condivise (SAIO_ISOLATED_WORKTREES) ogni utente lavora in un worktree suo,
+      // su un branch staccato dalla base: senza, due persone sullo stesso progetto si
+      // cambierebbero il checkout a vicenda. Sull'istanza personale la variabile è assente e
+      // il comportamento resta quello storico (working copy diretta, sessione per progetto).
+      let __dir = path.join(os.homedir(), 'dev', __tmuxName)
+      let __session = __tmuxName
+      if (process.env.SAIO_ISOLATED_WORKTREES === 'true' && opts.userEmail) {
+        const wt = await this.resolveWorktree(__dir, __tmuxName, opts)
+        if (wt) {
+          __dir = wt.dir
+          __session = wt.session
+        }
+      }
+      // Il comando va fra apici: send-keys tratterebbe `--permission-mode` come una sua opzione.
+      const __claudeCmd = claudeCommandWithPermissionMode('claude', opts.permissionMode)
+      effectiveCmd = `if ${TMUX_BIN} has-session -t ${__session} 2>/dev/null; then :; else ${TMUX_BIN} new-session -d -s ${__session} -c ${__dir}; ${TMUX_BIN} send-keys -t ${__session} '${__claudeCmd}' Enter; fi; exec ${TMUX_BIN} attach -t ${__session}`
+      tmuxSession = __session
+      logger.info(`[pty] ${projectId}: card→tmux ${__session} (cwd ${__dir})`)
     } else if (opts.remote) {
       const vps: VpsHost | undefined = VPS_HOSTS.find((v) => v.id === opts.remote!.vpsId)
       if (!vps) return { error: `unknown vpsId: ${opts.remote.vpsId}` }
@@ -631,6 +827,7 @@ class PtyManager {
       const cliArgs = buildCliArgsForAccount(cliName, {
         model: opts.model || account?.defaultModel,
         permissionMode: opts.permissionMode,
+        useDefaultPermissionMode: false,
       })
 
       const keyPath = path.join(os.homedir(), '.ssh', vps.keyName)
@@ -661,9 +858,12 @@ class PtyManager {
       // `isLocalCliInstalled` resta definita per usi futuri ma non più chiamata qui.
 
       Object.assign(env, spec.env)
+      if (isClaudeCli(spec.cliName)) {
+        Object.assign(env, sandboxEnvForBypass(resolvePermissionMode(opts.permissionMode)))
+      }
       effectiveCmd = [spec.cliName, ...spec.args].join(' ').trim()
       logger.info(
-        `[pty] ${projectId}: account=${account.id} cli=${spec.cliName} model=${opts.model || account.defaultModel || 'default'}`
+        `[pty] ${projectId}: account=${account.id} cli=${spec.cliName} model=${opts.model || account.defaultModel || 'default'} perm=${resolvePermissionMode(opts.permissionMode)}`
       )
     } else {
       // ==== Fallback: Local Claude (preserve V12 compatibility) ============
@@ -671,11 +871,13 @@ class PtyManager {
       const claudeArgs: string[] = []
       if (shouldResume) claudeArgs.push('--continue')
       if (opts.model) claudeArgs.push('--model', opts.model)
-      if (opts.permissionMode && opts.permissionMode !== 'default') {
-        claudeArgs.push('--permission-mode', opts.permissionMode)
+      const fallbackPerm = resolvePermissionMode(opts.permissionMode)
+      if (fallbackPerm !== 'default') {
+        claudeArgs.push('--permission-mode', fallbackPerm)
+        Object.assign(env, sandboxEnvForBypass(fallbackPerm))
       }
       effectiveCmd = ['claude', ...claudeArgs].join(' ')
-      logger.info(`[pty] ${projectId}: cwd=${cwd} resume=${shouldResume} model=${opts.model || 'default'} perm=${opts.permissionMode || 'default'}`)
+      logger.info(`[pty] ${projectId}: cwd=${cwd} resume=${shouldResume} model=${opts.model || 'default'} perm=${fallbackPerm}`)
     }
 
     // V15.1 WS31: pre-spawn update check (fire-and-forget, throttled 168h per tool).

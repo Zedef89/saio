@@ -16,6 +16,7 @@ import {
   FolderKanban,
   Archive,
   BarChart3,
+  Gauge,
   Wand2,
   BookOpen,
   Brain,
@@ -84,6 +85,8 @@ const navItems = [
   { to: '/infrastructure', i18nKey: 'sidebar.infrastructure', label: 'Infrastruttura', icon: Server },
   { to: '/deep-research', i18nKey: 'sidebar.deep_research', icon: Microscope },
   { to: '/cron', i18nKey: 'sidebar.automations', icon: Clock },
+  // Finestre/limiti degli account Claude + token davvero consumati (pagina Utilizzo)
+  { to: '/usage', i18nKey: 'sidebar.usage', label: 'Utilizzo', icon: Gauge },
   { to: '/metrics', i18nKey: 'sidebar.metrics', icon: BarChart3 },
   { to: '/extras', i18nKey: 'sidebar.extras', icon: Wand2 },
 ] as const

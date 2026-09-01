@@ -19,6 +19,12 @@ import { ptyWsUrl } from '@/lib/pty-ws'
 interface EmbeddedChatProps {
   projectId: string
   className?: string
+  /**
+   * Worktree isolato scelto dall'utente (istanze condivise). Passato al backend nella query
+   * del WebSocket: decide in quale directory nasce la sessione tmux.
+   */
+  worktreePath?: string
+  worktreeLabel?: string
 }
 
 interface SessionInfo {
@@ -121,7 +127,7 @@ async function promoteChoicesToInbox(
   })
 }
 
-export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
+export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel }: EmbeddedChatProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -154,10 +160,14 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
       return (localStorage.getItem(`chat-model-${projectId}`) as ModelId) || 'default'
     } catch { return 'default' }
   })
+  // Il default è 'bypassPermissions' perché è quello che il server applica comunque allo
+  // spawn (SAIO_DEFAULT_PERMISSION_MODE in pty-manager): la tendina deve mostrare la
+  // modalità con cui la sessione parte davvero, non 'Default'. Le altre scelte vincono.
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => {
     try {
-      return (localStorage.getItem(`chat-perm-${projectId}`) as PermissionMode) || 'default'
-    } catch { return 'default' }
+      const saved = localStorage.getItem(`chat-perm-${projectId}`) as PermissionMode | null
+      return saved && saved !== 'default' ? saved : 'bypassPermissions'
+    } catch { return 'bypassPermissions' }
   })
   const [appliedModel, setAppliedModel] = useState<ModelId>(model)
   const [appliedPerm, setAppliedPerm] = useState<PermissionMode>(permissionMode)
@@ -372,6 +382,13 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
       scrollSensitivity: 5,
       fastScrollSensitivity: 12,
       smoothScrollDuration: 0,
+      // Selezione col mouse mentre l'applicazione remota "possiede" il mouse (tmux con
+      // `mouse on`, Claude Code con i modi 1000/1002/1003/1006): il trascinamento va a
+      // loro, quindi xterm non seleziona nulla e Cmd+C copiava sempre una selezione
+      // vuota. Con questa opzione Option(⌥)+trascina forza la selezione locale.
+      // NB: su macOS xterm usa Option, NON Shift (shouldForceSelection), e di default
+      // l'opzione è false → senza questa riga non esiste alcun modo di selezionare.
+      macOptionClickForcesSelection: true,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -392,6 +409,8 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     if (forceNew) params.set('forceNew', 'true')
     if (appliedModel && appliedModel !== 'default') params.set('model', appliedModel)
     if (appliedPerm && appliedPerm !== 'default') params.set('permissionMode', appliedPerm)
+    if (worktreePath) params.set('worktreePath', worktreePath)
+    if (worktreeLabel) params.set('worktreeLabel', worktreeLabel)
     const wsUrl = ptyWsUrl(projectId, params)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
@@ -474,6 +493,27 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
         }).catch(() => { /* clipboard denied */ })
         return false
       }
+      return true
+    })
+
+    // OSC 52 — copia richiesta dal lato remoto (VPS) → clipboard del Mac.
+    // Serve perché la VPS non ha pbcopy/xclip: tmux 3.4 ha `set-clipboard on` e quando
+    // copi in copy-mode emette `ESC]52;c;<base64>BEL`. xterm non gestisce OSC 52 di suo,
+    // quindi la sequenza veniva scartata e sul Mac non arrivava niente.
+    // Solo SCRITTURA: il payload `?` è una richiesta di LETTURA della clipboard da parte
+    // del processo remoto e viene ignorata di proposito.
+    term.parser.registerOscHandler(52, (data: string) => {
+      const sep = data.indexOf(';')
+      if (sep < 0) return true
+      const payload = data.slice(sep + 1)
+      if (!payload || payload === '?') return true
+      try {
+        const bytes = Uint8Array.from(atob(payload), (ch) => ch.charCodeAt(0))
+        const text = new TextDecoder().decode(bytes)
+        // Safari concede la scrittura in clipboard solo vicino a un gesto utente: se la
+        // nega, fallisce in silenzio e resta comunque ⌥+trascina + Cmd+C.
+        if (text) navigator.clipboard?.writeText(text).catch(() => { /* clipboard denied */ })
+      } catch { /* base64 malformato: ignora */ }
       return true
     })
 
@@ -566,7 +606,22 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
     containerEl?.addEventListener('touchmove', onTouchMove, { passive: false })
     containerEl?.addEventListener('touchend', markScrolling, { passive: true })
 
+    // Copia automatica alla selezione, come nel Terminale del Mac.
+    // Copre il caso in cui la selezione la fa xterm (⌥+trascina, quando l'applicazione
+    // remota possiede il mouse — Claude Code coi modi 1000/1002/1003/1006): lì tmux non
+    // vede nulla, quindi niente OSC 52, e senza questo servirebbe anche Cmd+C.
+    // Il listener sta su document perché il rilascio può cadere fuori dal terminale;
+    // la scrittura avviene nello stack del gesto utente, così Safari la consente.
+    const copyOnSelect = () => {
+      const sel = term.getSelection()
+      if (sel && sel.trim()) {
+        navigator.clipboard?.writeText(sel).catch(() => { /* clipboard denied */ })
+      }
+    }
+    document.addEventListener('mouseup', copyOnSelect)
+
     return () => {
+      document.removeEventListener('mouseup', copyOnSelect)
       window.removeEventListener('resize', onResize)
       if (repaintRaf) cancelAnimationFrame(repaintRaf)
       scrollRepaintRef.current = null
@@ -585,7 +640,7 @@ export function EmbeddedChat({ projectId, className }: EmbeddedChatProps) {
       outputBufRef.current = ''
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, nonce, forceNew, appliedModel, appliedPerm])
+  }, [projectId, nonce, forceNew, appliedModel, appliedPerm, worktreePath, worktreeLabel])
 
   // Al ritorno in foreground (iOS aveva sospeso la pagina in background): se il socket
   // è caduto, riconnetti. La sessione tmux è viva → il replay del buffer ripristina tutto.
