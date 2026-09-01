@@ -45,6 +45,7 @@ import {
 } from '../lib/auth/totp'
 import {
   createSession,
+  sessionExpiry,
   findSessionByJti,
   rotateSession,
   revokeSession,
@@ -255,11 +256,35 @@ function setSessionCookies(req: Request, res: Response, access: string, refresh:
   })
 }
 
+/**
+ * Pulisce i cookie di SESSIONE lasciando stare quello di dispositivo fidato.
+ *
+ * Un refresh token scaduto (7 giorni) non dice niente su una fiducia data al dispositivo per
+ * 30: buttarla via insieme costringeva a rifare login e TOTP con in mano un cookie ancora
+ * valido. Se anche quello e' scaduto o revocato, a dire di no ci pensa `requireAuth`.
+ */
+function clearSessionCookies(res: Response): void {
+  res.clearCookie(COOKIE_ACCESS, { path: '/' })
+  res.clearCookie(COOKIE_REFRESH, { path: '/api/auth' })
+  res.clearCookie(COOKIE_PENDING, { path: '/' })
+}
+
+/** Pulisce tutto, fiducia compresa: logout esplicito e revoche. */
 function clearAllCookies(res: Response): void {
   res.clearCookie(COOKIE_ACCESS, { path: '/' })
   res.clearCookie(COOKIE_REFRESH, { path: '/api/auth' })
   res.clearCookie(COOKIE_PENDING, { path: '/' })
   res.clearCookie(COOKIE_TRUSTED, { path: '/' })
+}
+
+/**
+ * I giorni di fiducia se la richiesta ne chiede una valida, altrimenti null. Sta qui perche'
+ * la stessa risposta serve in due punti: il cookie da emettere e la durata del record di
+ * sessione, che deve coprirlo (vedi `sessionExpiry`).
+ */
+function trustedDaysOrNull(trustDevice: boolean | undefined, trustDays: number | undefined): number | null {
+  if (!trustDevice || !trustDays) return null
+  return (TRUSTED_TTL_OPTIONS as readonly number[]).includes(trustDays) ? trustDays : null
 }
 
 async function maybeSetTrustedCookie(
@@ -273,9 +298,9 @@ async function maybeSetTrustedCookie(
   trustDevice: boolean | undefined,
   trustDays: number | undefined
 ): Promise<void> {
-  if (!trustDevice || !trustDays) return
-  if (!(TRUSTED_TTL_OPTIONS as readonly number[]).includes(trustDays)) return
-  const trustedJwt = await signTrusted(dataDir, email, role, sid, jti, trustDays)
+  const days = trustedDaysOrNull(trustDevice, trustDays)
+  if (!days) return
+  const trustedJwt = await signTrusted(dataDir, email, role, sid, jti, days)
   const isProdOrHttps =
     process.env.NODE_ENV === 'production' ||
     req.protocol === 'https' ||
@@ -284,7 +309,7 @@ async function maybeSetTrustedCookie(
     httpOnly: true,
     secure: isProdOrHttps,
     sameSite: 'strict',
-    maxAge: trustDays * 24 * 60 * 60_000,
+    maxAge: days * 24 * 60 * 60_000,
     path: '/',
   })
 }
@@ -574,7 +599,9 @@ export function authRouter(dataDir: string): Router {
         role: payload.role,
         createdAt: new Date().toISOString(),
         refreshedAt: new Date().toISOString(),
-        expiresAt: pair.refreshExpiresAt,
+        expiresAt: sessionExpiry(pair.refreshExpiresAt, {
+          trustDays: trustedDaysOrNull(parsed.data.trustDevice, parsed.data.trustDays),
+        }),
         ip,
         userAgentHash: uah,
         revoked: false,
@@ -652,7 +679,9 @@ export function authRouter(dataDir: string): Router {
         role: payload.role,
         createdAt: new Date().toISOString(),
         refreshedAt: new Date().toISOString(),
-        expiresAt: pair.refreshExpiresAt,
+        expiresAt: sessionExpiry(pair.refreshExpiresAt, {
+          trustDays: trustedDaysOrNull(parsed.data.trustDevice, parsed.data.trustDays),
+        }),
         ip,
         userAgentHash: uah,
         revoked: false,
@@ -710,27 +739,28 @@ export function authRouter(dataDir: string): Router {
     }
     const payload = await verifyRefresh(dataDir, rt)
     if (!payload) {
-      clearAllCookies(res)
+      clearSessionCookies(res)
       res.status(401).json({ error: 'invalid_refresh' })
       return
     }
     const session = await findSessionByJti(dataDir, payload.jti)
     if (!session || session.revoked) {
-      clearAllCookies(res)
+      clearSessionCookies(res)
       res.status(401).json({ error: 'session_invalid' })
       return
     }
     const ip = getClientIp(req)
     const uah = hashUserAgent(req)
-    const pair = await signTokenPair(dataDir, payload.sub, payload.role)
+    // Stesso sid: e' la stessa sessione, e il cookie di dispositivo fidato ci punta.
+    const pair = await signTokenPair(dataDir, payload.sub, payload.role, session.sid)
     const newSess: Session = {
       jti: pair.jti,
       sid: pair.sid,
       email: payload.sub,
       role: payload.role,
-      createdAt: new Date().toISOString(),
+      createdAt: session.createdAt,
       refreshedAt: new Date().toISOString(),
-      expiresAt: pair.refreshExpiresAt,
+      expiresAt: sessionExpiry(pair.refreshExpiresAt, { previousExpiresAt: session.expiresAt }),
       ip,
       userAgentHash: uah,
       revoked: false,

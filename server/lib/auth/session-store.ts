@@ -33,7 +33,14 @@ interface SessionStore {
 
 interface RevokedRecord {
   jti: string
-  sid: string
+  /**
+   * La sessione revocata, oppure null quando a essere bruciato e' solo un refresh token.
+   *
+   * La distinzione e' il cuore del problema: `isSessionRevoked` cerca per sid, quindi
+   * scrivere qui un sid vivo equivale a buttare fuori quella sessione. Una rotazione di
+   * refresh token non revoca la sessione, brucia un token: va registrata per jti e basta.
+   */
+  sid: string | null
   revokedAt: string
   expiresAt: string
 }
@@ -94,6 +101,30 @@ function gcRevoked(store: RevokedStore): RevokedStore {
   return store
 }
 
+/**
+ * Fino a quando deve restare in vita il RECORD di sessione.
+ *
+ * Il record scadeva con il refresh token (7 giorni), ma il cookie "dispositivo fidato" dura
+ * fino a 30: passato il settimo giorno il record era scaduto e la prima scrittura su
+ * sessions.json lo faceva sparire per garbage collection. Da quel momento `isSessionRevoked`
+ * non lo trovava piu' e — giustamente fail-closed — trattava come revocato un cookie ancora
+ * valido, buttando fuori il dispositivo senza che nessuno avesse revocato niente.
+ *
+ * Successo il 01/09/2026 ad Alberto: cookie valido fino al 19/09, record scaduto il 27/08,
+ * sparito alla prima scrittura del file. Quindi il record vive quanto il piu' lungo dei tre:
+ * il refresh, l'eventuale fiducia al dispositivo, e la scadenza che aveva gia' (perche' un
+ * refresh non deve accorciare la finestra di un dispositivo fidato).
+ */
+export function sessionExpiry(
+  refreshExpiresAt: string,
+  opts: { trustDays?: number | null; previousExpiresAt?: string } = {},
+): string {
+  const candidates = [Date.parse(refreshExpiresAt)]
+  if (opts.trustDays) candidates.push(Date.now() + opts.trustDays * 24 * 60 * 60_000)
+  if (opts.previousExpiresAt) candidates.push(Date.parse(opts.previousExpiresAt))
+  return new Date(Math.max(...candidates.filter((n) => Number.isFinite(n)))).toISOString()
+}
+
 export async function createSession(dataDir: string, sess: Session): Promise<void> {
   let store = await readSessions(dataDir)
   store = gcSessions(store)
@@ -111,26 +142,33 @@ export async function findSessionByJti(dataDir: string, jti: string): Promise<Se
   return store.sessions.find((s) => s.jti === jti && !s.revoked) || null
 }
 
+/**
+ * Ruota il refresh token di una sessione, in un solo record e **senza cambiare il sid**.
+ *
+ * Prima ogni refresh creava una sessione nuova con un sid nuovo e marcava la vecchia
+ * `rotated`. Due conseguenze, entrambe sbagliate: il cookie di dispositivo fidato resta
+ * agganciato al sid vecchio, che diventava revocato — quindi un refresh buttava fuori il
+ * dispositivo; e il sid nuovo finiva nella lista delle revoche (il vecchio codice passava
+ * `newSession.sid`, con tanto di commento che ammetteva lo scambio), quindi la sessione
+ * appena creata nasceva gia' revocata.
+ *
+ * Il sid identifica la SESSIONE, il jti il singolo refresh token: a ruotare e' il secondo.
+ * Il primo resta, ed e' cio' che tiene in piedi il dispositivo fidato per tutti i suoi giorni.
+ */
 export async function rotateSession(
   dataDir: string,
   oldJti: string,
-  newSession: Session
+  next: Session
 ): Promise<void> {
   let store = await readSessions(dataDir)
   store = gcSessions(store)
-  const oldIdx = store.sessions.findIndex((s) => s.jti === oldJti)
-  if (oldIdx >= 0) {
-    const old = store.sessions[oldIdx]
-    if (old) {
-      old.revoked = true
-      old.revokedReason = 'rotated'
-      store.sessions[oldIdx] = old
-    }
-  }
-  store.sessions.push(newSession)
+  const idx = store.sessions.findIndex((s) => s.jti === oldJti)
+  // Record sparito (per esempio ripulito dalla GC): si ricrea invece di perdere la sessione.
+  if (idx >= 0) store.sessions[idx] = next
+  else store.sessions.push(next)
   await writeSessions(dataDir, store)
-  // Aggiungi anche a revoked-tokens per cache veloce
-  await addRevoked(dataDir, oldJti, newSession.sid /* ignore - old sid sarebbe meglio ma è in old */, newSession.expiresAt)
+  // Solo il token: `null` al posto del sid, altrimenti si revoca la sessione che si sta rinnovando.
+  await addRevoked(dataDir, oldJti, null, next.expiresAt)
 }
 
 export async function revokeSession(
@@ -175,12 +213,12 @@ export async function revokeAllSessionsForEmail(
 export async function addRevoked(
   dataDir: string,
   jti: string,
-  sid: string,
+  sid: string | null,
   expiresAt: string
 ): Promise<void> {
   let store = await readRevoked(dataDir)
   store = gcRevoked(store)
-  if (!store.revoked.find((r) => r.sid === sid || r.jti === jti)) {
+  if (!store.revoked.find((r) => r.jti === jti || (sid !== null && r.sid === sid))) {
     store.revoked.push({ jti, sid, revokedAt: new Date().toISOString(), expiresAt })
     await writeRevoked(dataDir, store)
   }
@@ -189,7 +227,8 @@ export async function addRevoked(
 export async function isSessionRevoked(dataDir: string, sid: string): Promise<boolean> {
   // Check revoked list first (fast)
   const rev = await readRevoked(dataDir)
-  if (rev.revoked.find((r) => r.sid === sid)) return true
+  // `r.sid === null` = solo un refresh token bruciato: non dice niente sulla sessione.
+  if (rev.revoked.find((r) => r.sid !== null && r.sid === sid)) return true
   // Fallback: session itself flagged revoked
   const sess = await findSessionBySid(dataDir, sid)
   if (!sess) return true // session deleted/expired = treat as revoked

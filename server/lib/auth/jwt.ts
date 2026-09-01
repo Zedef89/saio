@@ -101,13 +101,18 @@ export interface TokenPair {
   refreshExpiresAt: string
 }
 
+/**
+ * `existingSid`: al rinnovo la sessione e' la stessa e il suo id non deve cambiare, altrimenti
+ * il cookie di dispositivo fidato — che punta a quel sid — resta orfano. Si rinnova il jti.
+ */
 export async function signTokenPair(
   dataDir: string,
   email: string,
-  role: 'owner' | 'guest'
+  role: 'owner' | 'guest',
+  existingSid?: string
 ): Promise<TokenPair> {
   const secret = await getJwtSecret(dataDir)
-  const sid = crypto.randomUUID()
+  const sid = existingSid || crypto.randomUUID()
   const jti = crypto.randomUUID()
   const access = jwt.sign({ sub: email, role, sid, type: 'access' }, secret, { expiresIn: '1h' })
   // jti già nel payload — non duplicare con `jwtid` option (causa errore "payload already has jti")
