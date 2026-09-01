@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { logger } from '../lib/logger'
+import { auditAction } from '../lib/auth/audit'
 
 // Default cross-platform (niente path hardcoded). Impostare VAULT_PATH nell'env per il vault reale.
 const VAULT_PATH = process.env.VAULT_PATH || path.join(os.homedir(), 'Obsidian')
@@ -143,6 +144,9 @@ export function vaultRouter() {
 
       const st = await fs.stat(abs)
       logger.info(`[vault] salvato ${rel} (${st.size} byte)`)
+      // Il vault e' la memoria del team: una sovrascrittura sbagliata si nota settimane dopo.
+      // Il backup permette di tornare indietro, questa riga dice a chi chiedere perche'.
+      auditAction(req, 'vault.written', { path: rel, size: st.size })
       res.json({ ok: true, path: rel, size: st.size, mtime: st.mtime.toISOString() })
     } catch (err) {
       logger.error('Vault file write failed:', err)

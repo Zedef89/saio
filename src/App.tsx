@@ -66,7 +66,9 @@ export default function App() {
           <Route path="chats" element={<ChatsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="memories" element={<MemoriesPage />} />
-          <Route path="infrastructure" element={<InfrastructurePage />} />
+          {/* Owner-only: VPS, credenziali, chiavi SSH e automazioni che girano come root.
+              Stesso confine del server (middleware/access-policy.ts). */}
+          <Route path="infrastructure" element={<RequireOwner><InfrastructurePage /></RequireOwner>} />
           <Route path="inbox" element={<InboxPage />} />
           <Route path="tasks" element={<TasksPage />} />
           <Route path="projects" element={<ProjectsPage />} />
@@ -88,7 +90,7 @@ export default function App() {
               </Suspense>
             }
           />
-          <Route path="extras" element={<ExtrasPage />} />
+          <Route path="extras" element={<RequireOwner><ExtrasPage /></RequireOwner>} />
           <Route
             path="docs"
             element={
@@ -105,11 +107,11 @@ export default function App() {
               </Suspense>
             }
           />
-          <Route path="cron" element={<CronPage />} />
+          <Route path="cron" element={<RequireOwner><CronPage /></RequireOwner>} />
           <Route path="recipes" element={<RecipesPage />} />
           <Route path="deep-research" element={<DeepResearchPage />} />
-          <Route path="accounts" element={<AccountsPage />} />
-          <Route path="accounts/task-types" element={<TaskTypesPage />} />
+          <Route path="accounts" element={<RequireOwner><AccountsPage /></RequireOwner>} />
+          <Route path="accounts/task-types" element={<RequireOwner><TaskTypesPage /></RequireOwner>} />
           <Route
             path="settings/access"
             element={

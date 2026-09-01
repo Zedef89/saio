@@ -5,6 +5,9 @@ import { logger } from './logger'
 import { COOKIE_ACCESS, COOKIE_TRUSTED, isAuthRequired } from './auth/constants'
 import { verifyAccess, verifyTrusted } from './auth/jwt'
 import { isSessionRevoked } from './auth/session-store'
+import { effectiveRole } from './auth/allowlist'
+import { audit } from './auth/audit'
+import { guestPtyAllowed } from '../middleware/access-policy'
 
 const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:3030',
@@ -99,6 +102,19 @@ function parseCookies(header: string | undefined): Record<string, string> {
 }
 
 /**
+ * IP del client sull'upgrade. `getClientIp` vuole una Request di Express e qui c'e' una
+ * IncomingMessage nuda: stessa precedenza (CF-Connecting-IP, poi X-Forwarded-For), poche
+ * righe invece di un cast.
+ */
+function upgradeIp(req: IncomingMessage): string {
+  const cf = req.headers['cf-connecting-ip']
+  if (typeof cf === 'string' && cf.length > 0) return cf.trim()
+  const xff = req.headers['x-forwarded-for']
+  if (typeof xff === 'string' && xff.length > 0) return (xff.split(',')[0] || '').trim()
+  return req.socket?.remoteAddress || '127.0.0.1'
+}
+
+/**
  * Autentica l'upgrade WebSocket riusando la STESSA logica fail-closed di requireAuth
  * (server/middleware/require-auth.ts). L'upgrade gira su server.on('upgrade'), fuori dai
  * middleware Express, quindi il controllo va replicato qui o il PTY (shell remota) resta
@@ -113,30 +129,38 @@ function parseCookies(header: string | undefined): Record<string, string> {
 interface UpgradeAuth {
   ok: boolean
   email?: string
+  /**
+   * Ruolo di chi si collega. Il terminale vero passa da qui, non dalle route REST: senza il
+   * ruolo sull'upgrade, spegnere il PTY ai guest lato Express non chiuderebbe niente.
+   */
+  role?: 'owner' | 'guest'
 }
 
 async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promise<UpgradeAuth> {
   // Master switch dev: bypassa tutto
-  if (!isAuthRequired()) return { ok: true }
+  if (!isAuthRequired()) return { ok: true, role: 'owner' }
   // Desktop remote-only: la webview LOCALE entra senza login; il tunnel deve autenticarsi.
-  if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req)) return { ok: true }
+  if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req))
+    return { ok: true, role: 'owner' }
   // SSO via Cloudflare Access: header iniettato dall'edge dopo verifica identità.
   const cfEmailHeader = req.headers['cf-access-authenticated-user-email']
   const ownerEmail = (process.env.DASHBOARD_OWNER_EMAIL || '').trim().toLowerCase()
   if (typeof cfEmailHeader === 'string' && ownerEmail && cfEmailHeader.trim().toLowerCase() === ownerEmail) {
-    return { ok: true, email: cfEmailHeader.trim().toLowerCase() }
+    return { ok: true, email: cfEmailHeader.trim().toLowerCase(), role: 'owner' }
   }
   const cookies = parseCookies(req.headers.cookie)
   // Trusted device cookie (long-lived) prima, poi access token.
   const trusted = cookies[COOKIE_TRUSTED]
   if (trusted) {
     const tp = await verifyTrusted(dataDir, trusted)
-    if (tp && !(await isSessionRevoked(dataDir, tp.sid))) return { ok: true, email: tp.sub }
+    if (tp && !(await isSessionRevoked(dataDir, tp.sid)))
+      return { ok: true, email: tp.sub, role: await effectiveRole(dataDir, tp.sub, tp.role) }
   }
   const at = cookies[COOKIE_ACCESS]
   if (at) {
     const payload = await verifyAccess(dataDir, at)
-    if (payload && !(await isSessionRevoked(dataDir, payload.sid))) return { ok: true, email: payload.sub }
+    if (payload && !(await isSessionRevoked(dataDir, payload.sid)))
+      return { ok: true, email: payload.sub, role: await effectiveRole(dataDir, payload.sub, payload.role) }
   }
   // Nessun ramo "basta Cloudflare Access": un guest revocato da SAIO resterebbe nella policy
   // Access e potrebbe riaprire un PTY. Il revoke deve chiudere tutto subito, quindi per i
@@ -169,10 +193,33 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
           socket.destroy()
           return
         }
+        // Terminale spento per i guest: qui si chiude davvero, perche' il PTY nasce
+        // sull'upgrade. Il 403 e' esplicito per non far sembrare l'interfaccia rotta.
+        if (auth.role === 'guest' && !guestPtyAllowed()) {
+          void audit({
+            type: 'access.denied',
+            email: auth.email,
+            ip: upgradeIp(req),
+            userAgentHash: '',
+            meta: { path: url.split('?')[0], reason: 'terminale' },
+          })
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
         const projectId = match[1]
         const spawnOpts = parseSpawnOptions(url)
         // Identità di chi apre la sessione: decide worktree isolato e credenziali git.
         if (auth.email) spawnOpts.userEmail = auth.email
+        // Un terminale aperto e' l'azione piu' pesante dell'interfaccia: va nell'audit con
+        // chi, quando e su quale progetto, altrimenti resta solo nei log applicativi.
+        void audit({
+          type: 'pty.opened',
+          email: auth.email,
+          ip: upgradeIp(req),
+          userAgentHash: '',
+          meta: { projectId, role: auth.role ?? 'owner' },
+        })
         if (Object.keys(spawnOpts).length > 0) {
           logger.info(`[ws-pty] ${projectId} spawn opts from query: ${JSON.stringify(spawnOpts)}`)
         }

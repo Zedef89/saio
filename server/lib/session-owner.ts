@@ -60,6 +60,29 @@ export async function withOwnerPrefix(name: string, dataDir: string, email: stri
   return slug ? `${slug}-${name}` : name
 }
 
+/**
+ * Se questo utente puo' agire (chiudere, cambiare account) su questa sessione.
+ *
+ * L'owner puo' su tutto: e' lui che tiene in piedi la macchina e deve poter chiudere una
+ * sessione impazzita di chiunque. Un guest solo sulle proprie, riconosciute dal prefisso del
+ * nome — che e' l'unico posto dove il proprietario e' scritto (vedi in testa a questo file).
+ *
+ * Le sessioni senza prefisso conosciuto (aperte a mano da SSH) restano fuori portata dei
+ * guest: se non si sa di chi sono, il default e' non toccarle.
+ */
+export async function canActOnSession(
+  dataDir: string,
+  sessionName: string,
+  user: { email: string; role: 'owner' | 'guest' } | undefined,
+): Promise<boolean> {
+  if (!user) return false
+  if (user.role === 'owner') return true
+  const owners = await knownOwners(dataDir)
+  const owner = ownerFromName(sessionName, owners)
+  if (!owner) return false
+  return owner.slug === (await ownerSlugForEmail(dataDir, user.email))
+}
+
 /** Slug di un'email: quello configurato in git-identities.json, altrimenti dedotto. */
 export async function ownerSlugForEmail(dataDir: string, email: string): Promise<string> {
   try {

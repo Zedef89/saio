@@ -12,6 +12,7 @@ import type { Request, Response, NextFunction } from 'express'
 import { COOKIE_ACCESS, COOKIE_TRUSTED, isAuthRequired } from '../lib/auth/constants'
 import { verifyAccess, verifyTrusted } from '../lib/auth/jwt'
 import { isSessionRevoked } from '../lib/auth/session-store'
+import { effectiveRole } from '../lib/auth/allowlist'
 import { audit } from '../lib/auth/audit'
 import { getClientIp, hashUserAgent } from '../lib/auth/ip-trust'
 
@@ -87,7 +88,7 @@ export function makeRequireAuth(dataDir: string) {
           res.status(401).json({ error: 'session_revoked' })
           return
         }
-        req.user = { email: tp.sub, role: tp.role, sid: tp.sid }
+        req.user = { email: tp.sub, role: await effectiveRole(dataDir, tp.sub, tp.role), sid: tp.sid }
         next()
         return
       }
@@ -115,7 +116,8 @@ export function makeRequireAuth(dataDir: string) {
       res.status(401).json({ error: 'session_revoked' })
       return
     }
-    req.user = { email: payload.sub, role: payload.role, sid: payload.sid }
+    // Ruolo dall'allowlist, non dal token: vedi `effectiveRole`.
+    req.user = { email: payload.sub, role: await effectiveRole(dataDir, payload.sub, payload.role), sid: payload.sid }
     next()
   }
 }

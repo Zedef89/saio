@@ -62,6 +62,7 @@ import { onboardingRouter } from './routes/onboarding'
 import { scanRouter } from './routes/scan'
 import { authLimiter, checkBanlist } from './middleware/rate-limit'
 import { makeRequireAuth, requireOwner } from './middleware/require-auth'
+import { accessPolicy } from './middleware/access-policy'
 import { cronTokenOrAuth } from './middleware/cron-bypass'
 import cookieParser from 'cookie-parser'
 
@@ -208,17 +209,26 @@ app.get('/api/health', (_req, res) => {
 //  2. /api/error-pipeline   X-Cron-Token only (verifyCronToken self-protected)
 //  3. /api/cron             X-Cron-Token OR (JWT + role:owner)
 //  4. /api/* umbrella JWT   gates everything below
-//  5. /api/admin/access     requireOwner additional gate (in 3H)
+//  5. accessPolicy          nega ai guest le rotte owner-only (middleware/access-policy.ts)
+//  6. /api/admin/access     requireOwner additional gate (in 3H)
 // ============================================================
 app.use('/api/auth', checkBanlist, authLimiter, authRouter(DATA_DIR))
 
+const requireAuth = makeRequireAuth(DATA_DIR)
+
 // CRON-protected routes (X-Cron-Token gate, bypass JWT)
 app.use('/api/error-pipeline', errorPipelineRouter())
-app.use('/api/cron', cronTokenOrAuth, cronRouter())
+// `cronTokenOrAuth` da solo NON respinge nessuno: si limita a marcare `req.skipAuth` quando
+// il token combacia. Essendo montato PRIMA dell'umbrella, /api/cron restava raggiungibile
+// senza sessione (creare, lanciare e cancellare job che girano come root). requireAuth +
+// requireOwner completano il "X-Cron-Token OR (JWT + role:owner)" promesso qui sopra:
+// con skipAuth requireAuth mette un utente owner e i due passano lisci.
+app.use('/api/cron', cronTokenOrAuth, requireAuth, requireOwner, cronRouter())
 
 // JWT umbrella — tutte le rotte dopo richiedono auth (a meno che req.skipAuth)
-const requireAuth = makeRequireAuth(DATA_DIR)
 app.use('/api', requireAuth)
+// Ruolo: l'umbrella dice CHI sei, questa dice cosa puoi fare.
+app.use('/api', accessPolicy)
 
 // Routes (esistenti, ora protette)
 app.use('/api/briefs', briefsRouter(DATA_DIR))

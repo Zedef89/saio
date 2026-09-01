@@ -6,6 +6,7 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import { logger } from '../lib/logger'
 import { atomicWriteFile } from '../lib/atomic-write'
+import { auditAction } from '../lib/auth/audit'
 
 /**
  * Credenziali di Nicola. Due tipi:
@@ -164,11 +165,14 @@ export function credentialsRouter(dataDir: string) {
   })
 
   // Rivela il valore in chiaro (on-demand: per copiare o modificare). Solo custom.
+  // Il valore esce dalla macchina: la riga di audit e' l'unico modo per sapere, dopo, chi
+  // l'ha visto. Si registra il nome, mai il valore.
   router.get('/:id/reveal', async (req, res) => {
     const id = String(req.params.id)
     const creds = await loadCustom(dataDir)
     const c = creds.find((x) => x.id === id)
     if (!c) return res.status(404).json({ error: 'not_found' })
+    auditAction(req, 'credential.revealed', { id, name: c.name, project: c.project })
     res.json({ value: c.value })
   })
 

@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
-import { useMe, useLogout } from '@/hooks/useAuth'
+import { useMe, useIsOwner, useLogout } from '@/hooks/useAuth'
 import { LogOut, UserCog, Globe, ScanLine } from 'lucide-react'
 import { CloudflareSetupWizard } from '@/components/onboarding/CloudflareSetupWizard'
 import { AutoScanWizard } from '@/components/onboarding/AutoScanWizard'
@@ -82,19 +82,23 @@ const navItems = [
   { to: '/docs', i18nKey: 'sidebar.docs', icon: BookOpen },
   // Memorie di progetto + CLAUDE.md (globale e per progetto), in lettura/scrittura
   { to: '/memories', i18nKey: 'sidebar.memories', label: 'Memorie', icon: Brain },
-  { to: '/infrastructure', i18nKey: 'sidebar.infrastructure', label: 'Infrastruttura', icon: Server },
+  // `ownerOnly`: pagine che il server nega ai guest (middleware/access-policy.ts) — VPS,
+  // credenziali, chiavi SSH, automazioni che girano come root. Mostrarle a chi prendera' un
+  // 403 non aiuta nessuno.
+  { to: '/infrastructure', i18nKey: 'sidebar.infrastructure', label: 'Infrastruttura', icon: Server, ownerOnly: true },
   { to: '/deep-research', i18nKey: 'sidebar.deep_research', icon: Microscope },
-  { to: '/cron', i18nKey: 'sidebar.automations', icon: Clock },
+  { to: '/cron', i18nKey: 'sidebar.automations', icon: Clock, ownerOnly: true },
   // Finestre/limiti degli account Claude + token davvero consumati (pagina Utilizzo)
   { to: '/usage', i18nKey: 'sidebar.usage', label: 'Utilizzo', icon: Gauge },
   { to: '/metrics', i18nKey: 'sidebar.metrics', icon: BarChart3 },
-  { to: '/extras', i18nKey: 'sidebar.extras', icon: Wand2 },
+  { to: '/extras', i18nKey: 'sidebar.extras', icon: Wand2, ownerOnly: true },
 ] as const
 
 const COLLAPSE_KEY = 'saio-sidebar-collapsed'
 
 export function Sidebar() {
   const { t } = useTranslation('nav')
+  const isOwner = useIsOwner()
   // V14.19 — collapsible desktop con persistenza localStorage
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -140,7 +144,7 @@ export function Sidebar() {
 
           {/* Nav items principali */}
           <nav className={cn('py-4 space-y-1 relative', collapsed ? 'px-2' : 'px-3')}>
-            {navItems.map(item => {
+            {navItems.filter(item => isOwner || !('ownerOnly' in item && item.ownerOnly)).map(item => {
               // V14.20 — isActive computato qui (non via NavLink callback) per compat con Radix asChild
               const isActive = location.pathname === item.to || location.pathname.startsWith(item.to + '/')
               const linkClass = cn(

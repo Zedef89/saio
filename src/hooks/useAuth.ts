@@ -33,6 +33,19 @@ export function useMe() {
   })
 }
 
+/**
+ * Se l'utente corrente e' il proprietario dell'istanza. Serve a non mostrare quello che il
+ * server rifiuterebbe comunque (middleware/access-policy.ts): un menu pieno di pagine che
+ * rispondono 403 sembra un'applicazione rotta, non un permesso mancante.
+ *
+ * `authBypass` (dev, DASHBOARD_AUTH_REQUIRED=false) vale owner: in locale non c'e' un ruolo
+ * da rispettare.
+ */
+export function useIsOwner(): boolean {
+  const { data } = useMe()
+  return !!data && (data.role === 'owner' || data.authBypass)
+}
+
 export function useLogout() {
   const qc = useQueryClient()
   return useMutation({

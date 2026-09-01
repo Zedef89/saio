@@ -47,6 +47,49 @@ export async function writeAllowlist(dataDir: string, list: Allowlist): Promise<
   await atomicWriteFile(file, JSON.stringify(list, null, 2))
 }
 
+/**
+ * L'allowlist letta con cache invalidata dall'mtime.
+ *
+ * Serve perche' il ruolo va riletto a OGNI richiesta (vedi `effectiveRole`): rileggere e
+ * riparsare il file ogni volta sarebbe un accesso al disco per chiamata API, tenerlo in
+ * memoria senza controllo renderebbe invisibile una promozione fino al riavvio.
+ */
+let cache: { mtimeMs: number; list: Allowlist } | null = null
+
+export async function readAllowlistCached(dataDir: string): Promise<Allowlist> {
+  const file = authPath(dataDir, 'allowedEmails')
+  try {
+    const { mtimeMs } = await fs.stat(file)
+    if (cache && cache.mtimeMs === mtimeMs) return cache.list
+    const list = await readAllowlist(dataDir)
+    cache = { mtimeMs, list }
+    return list
+  } catch {
+    return { ...EMPTY }
+  }
+}
+
+/**
+ * Il ruolo che vale ADESSO per questa email.
+ *
+ * Il token dice CHI sei e non va rimesso in discussione; COSA puoi fare lo dice l'allowlist,
+ * che e' l'unico posto dove l'owner scrive le sue decisioni. Tenere il ruolo solo dentro il
+ * token significa che una promozione o una retrocessione non hanno effetto finche' quel token
+ * non scade — e il cookie "dispositivo fidato" dura fino a 30 giorni.
+ *
+ * `fallback` (il ruolo scritto nel token) copre il caso in cui l'email non sia piu' in
+ * allowlist: li' non si promuove nessuno, e comunque la revoca ha gia' invalidato le sessioni.
+ */
+export async function effectiveRole(
+  dataDir: string,
+  email: string,
+  fallback: AllowedRole,
+): Promise<AllowedRole> {
+  const norm = normalizeEmail(email)
+  const list = await readAllowlistCached(dataDir)
+  return list.entries.find((e) => e.email === norm)?.role ?? fallback
+}
+
 export async function findAllowed(dataDir: string, email: string): Promise<AllowedEmail | null> {
   const norm = normalizeEmail(email)
   const list = await readAllowlist(dataDir)

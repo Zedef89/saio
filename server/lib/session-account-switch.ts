@@ -165,7 +165,7 @@ async function ensureTrusted(configDir: string, cwd: string): Promise<void> {
 export async function switchSessionAccount(
   session: string,
   targetAccountId: string,
-  opts: { force?: boolean } = {}
+  opts: { force?: boolean; userEmail?: string | null } = {}
 ): Promise<SwitchResult | SwitchError> {
   const destDir = await configDirForAccount(targetAccountId)
   if (!destDir) return { ok: false, code: 'unknown_account', message: `account sconosciuto: ${targetAccountId}` }
@@ -229,10 +229,20 @@ export async function switchSessionAccount(
 
   // withPermissionMode tiene la modalità permessi allineata agli altri punti di spawn:
   // cambiare account non deve far ripartire la sessione con permessi diversi da come era.
-  const cmd = withPermissionMode(
-    transcript
-      ? `CLAUDE_CONFIG_DIR='${destDir}' claude --resume ${transcript}`
-      : `CLAUDE_CONFIG_DIR='${destDir}' claude`
+  // La nota su chi sta usando la sessione va riattaccata: cambiare abbonamento non cambia la
+  // persona, ma il processo claude riparte da zero e senza questa se la dimenticherebbe.
+  const { writeIdentityFile, withIdentityFile } = await import('./session-identity')
+  const identityFile = await writeIdentityFile(
+    process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'),
+    opts.userEmail,
+  )
+  const cmd = withIdentityFile(
+    withPermissionMode(
+      transcript
+        ? `CLAUDE_CONFIG_DIR='${destDir}' claude --resume ${transcript}`
+        : `CLAUDE_CONFIG_DIR='${destDir}' claude`
+    ),
+    identityFile,
   )
   await execFileAsync(TMUX_BIN, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'])
   logger.info(`[switch-account] ${session}: ${fromSlot} → ${targetAccountId}${transcript ? ` (resume ${transcript})` : ' (chat nuova)'}`)

@@ -330,6 +330,12 @@ export interface Session {
   // uno solo e condiviso: senza negoziazione l'ultimo resize vince e gli altri device
   // si ritrovano una griglia sbagliata).
   clientSizes?: Map<number, { cols: number; rows: number }>
+  /**
+   * Chi ha aperto la sessione. Le sessioni PTY sono indicizzate per progetto e la lista e'
+   * comune, quindi senza questo campo chiunque puo' chiudere il terminale di chiunque:
+   * serve a dire di no a un guest che prova a killare la sessione di un altro.
+   */
+  ownerEmail?: string
 }
 
 export interface SpawnOptions {
@@ -813,7 +819,17 @@ class PtyManager {
         }
       }
       // Il comando va fra apici: send-keys tratterebbe `--permission-mode` come una sua opzione.
-      const __claudeCmd = claudeCommandWithPermissionMode('claude', opts.permissionMode)
+      // La nota di identita' passa da un file (`"$(cat …)"`): qui il comando e' gia' dentro
+      // due livelli di quoting e un apostrofo nel testo romperebbe tutto.
+      const { writeIdentityFile, withIdentityFile } = await import('./session-identity')
+      const __identityFile = await writeIdentityFile(
+        process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'),
+        opts.userEmail,
+      )
+      const __claudeCmd = withIdentityFile(
+        claudeCommandWithPermissionMode('claude', opts.permissionMode),
+        __identityFile,
+      )
       effectiveCmd = `if ${TMUX_BIN} has-session -t ${__session} 2>/dev/null; then :; else ${TMUX_BIN} new-session -d -s ${__session} -c ${__dir}; ${TMUX_BIN} send-keys -t ${__session} '${__claudeCmd}' Enter; fi; exec ${TMUX_BIN} attach -t ${__session}`
       tmuxSession = __session
       logger.info(`[pty] ${projectId}: card→tmux ${__session} (cwd ${__dir})`)
@@ -849,6 +865,15 @@ class PtyManager {
         permissionMode: opts.permissionMode,
         resume,
       })
+      // Chi ha aperto la sessione, detto alla CLI: senza, si presenterebbe come il titolare
+      // dell'abbonamento Anthropic (vedi lib/session-identity.ts).
+      const { identityArgs } = await import('./session-identity')
+      spec.args.push(
+        ...(await identityArgs(
+          process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'),
+          opts.userEmail,
+        )),
+      )
 
       // V14.14: rimosso il pre-spawn health check + auto-install console.
       // Causava 2 cmd.exe Windows in apertura simultanea (React strict mode dev runs
@@ -953,6 +978,7 @@ class PtyManager {
       ptsName: (proc as any).ptsName,
       tmuxSession,
       clientSizes: new Map(),
+      ownerEmail: opts.userEmail,
     }
 
     proc.onData((data) => {

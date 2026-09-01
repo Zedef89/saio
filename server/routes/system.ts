@@ -17,6 +17,7 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { logger } from '../lib/logger'
 import { TMUX_BIN } from '../lib/tmux-bin'
+import { auditAction } from '../lib/auth/audit'
 
 // V15.0 WS19 — In-memory lock per prevenire doppio install Python deps
 let pythonDepsInstallRunning = false
@@ -516,11 +517,20 @@ export function systemRouter(): Router {
       res.status(400).json({ error: 'invalid_session_name' })
       return
     }
+    // La lista sessioni e' comune a tutti: senza questo controllo un invitato chiude il
+    // lavoro in corso di un collega con un click. Il proprietario e' nel prefisso del nome.
+    const { canActOnSession } = await import('../lib/session-owner')
+    if (!(await canActOnSession(DATA_DIR(), name, req.user))) {
+      auditAction(req, 'access.denied', { method: 'DELETE', path: `/system/tmux-sessions/${name}`, reason: 'sessione di un altro utente' })
+      res.status(403).json({ error: 'not_your_session' })
+      return
+    }
     try {
       const { execFile } = await import('node:child_process')
       const { promisify } = await import('node:util')
       const execFileAsync = promisify(execFile)
       await execFileAsync(TMUX_BIN, ['kill-session', '-t', `=${name}`])
+      auditAction(req, 'tmux.killed', { name })
       res.json({ ok: true, killed: name })
     } catch (err) {
       res.status(500).json({ error: 'kill_failed', message: (err as Error).message })
@@ -598,6 +608,10 @@ export function systemRouter(): Router {
       // le sessioni create da qui partirebbero col comportamento di default.
       const { withPermissionMode, resolvePermissionMode } = await import('../lib/pty-manager')
       claudeCmd = withPermissionMode(claudeCmd)
+      // Chi apre la sessione lo sa gia' SAIO (utente autenticato): va detto anche alla CLI,
+      // che altrimenti si presenta col titolare dell'abbonamento Anthropic.
+      const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
+      claudeCmd = withIdentityFile(claudeCmd, await writeIdentityFile(DATA_DIR(), requester))
 
       await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', name, '-c', cwd])
       if (startClaude) {
@@ -608,6 +622,9 @@ export function systemRouter(): Router {
       }
 
       logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ` (+claude account=${accountLabel})` : ''}`)
+      // Una sessione = un terminale root su questa macchina: e' l'azione piu' pesante che
+      // l'interfaccia permette, e va nell'audit anche quando va tutto bene.
+      auditAction(req, 'tmux.created', { name, cwd, projectId, account: startClaude ? accountLabel : null })
       res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })
@@ -628,14 +645,24 @@ export function systemRouter(): Router {
       res.status(400).json({ error: 'invalid_account' })
       return
     }
+    const { canActOnSession } = await import('../lib/session-owner')
+    if (!(await canActOnSession(DATA_DIR(), name, req.user))) {
+      auditAction(req, 'access.denied', { method: 'POST', path: `/system/tmux-sessions/${name}/account`, reason: 'sessione di un altro utente' })
+      res.status(403).json({ error: 'not_your_session' })
+      return
+    }
     try {
       const { switchSessionAccount } = await import('../lib/session-account-switch')
-      const out = await switchSessionAccount(name, account, { force: req.body?.force === true })
+      const out = await switchSessionAccount(name, account, {
+        force: req.body?.force === true,
+        userEmail: req.user?.email || null,
+      })
       if (!out.ok) {
         // `busy` non e' un errore del client: e' uno stato che l'utente puo' forzare.
         res.status(out.code === 'busy' ? 409 : 400).json({ error: out.code, message: out.message })
         return
       }
+      auditAction(req, 'tmux.account.switched', { name, account })
       res.json(out)
     } catch (err) {
       res.status(500).json({ error: 'switch_failed', message: (err as Error).message })

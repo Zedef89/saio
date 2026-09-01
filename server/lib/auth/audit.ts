@@ -4,7 +4,9 @@
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import type { Request } from 'express'
 import { authPath, AUTH_DIR_NAME } from './constants'
+import { getClientIp, hashUserAgent } from './ip-trust'
 import { logger } from '../logger'
 
 export type AuditEventType =
@@ -23,6 +25,16 @@ export type AuditEventType =
   | 'invite.revoked'
   | 'ban.added'
   | 'unauthorized.access'
+  // Azioni, non solo accessi. Fino a qui il log rispondeva a "chi e' entrato"; senza queste
+  // righe, davanti a una credenziale usata male o a un WorkLog sovrascritto si sa solo chi
+  // era loggato quel giorno, non chi ha fatto cosa. Su un'istanza condivisa non basta.
+  | 'access.denied'
+  | 'credential.revealed'
+  | 'vault.written'
+  | 'pty.opened'
+  | 'tmux.created'
+  | 'tmux.killed'
+  | 'tmux.account.switched'
 
 export interface AuditEvent {
   ts: string
@@ -53,6 +65,28 @@ export async function audit(event: Omit<AuditEvent, 'ts'>): Promise<void> {
   } catch (err) {
     logger.error('[audit] write failed', err, full)
   }
+}
+
+/**
+ * Stessa riga di audit, ma con chi/da dove ricavati dalla richiesta. Esiste per non ripetere
+ * `getClientIp`/`hashUserAgent` in ogni route che registra un'azione: quattro righe copiate
+ * dieci volte diventano dieci occasioni di dimenticarne una.
+ *
+ * Fire-and-forget di proposito: un audit che fallisce non deve far fallire l'azione (e
+ * l'errore finisce comunque nei log del server).
+ */
+export function auditAction(
+  req: Request,
+  type: AuditEventType,
+  meta?: Record<string, unknown>,
+): void {
+  void audit({
+    type,
+    email: req.user?.email,
+    ip: getClientIp(req),
+    userAgentHash: hashUserAgent(req),
+    meta,
+  })
 }
 
 void AUTH_DIR_NAME // keep import side-effect-free

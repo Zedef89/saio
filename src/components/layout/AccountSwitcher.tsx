@@ -20,6 +20,7 @@ import {
 import { api } from '@/lib/api'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { useIsOwner } from '@/hooks/useAuth'
 
 const MODE_LABELS: Record<string, string> = {
   plan: 'Plan',
@@ -46,6 +47,10 @@ function HealthDot({ health }: { health: string }) {
 export function AccountSwitcher() {
   const [open, setOpen] = useState(false)
   const queryClient = useQueryClient()
+  // L'account attivo qui e' quello di DEFAULT dell'istanza: cambiarlo tocca il lavoro di
+  // tutti, quindi e' roba da owner. Un guest sceglie il proprio abbonamento sessione per
+  // sessione dalla pagina Sessioni, che resta aperta a tutti.
+  const isOwner = useIsOwner()
 
   const accounts = useQuery({
     queryKey: ['accounts'],
@@ -72,6 +77,8 @@ export function AccountSwitcher() {
 
   const activeAccount = accounts.data?.accounts.find((a) => a.id === accounts.data?.activeId) || null
   const healthById = new Map((health.data?.results || []).map((r: any) => [r.accountId, r]))
+
+  if (!isOwner) return null
 
   return (
     <Popover open={open} onOpenChange={setOpen}>

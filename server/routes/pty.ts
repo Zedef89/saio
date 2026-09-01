@@ -3,6 +3,7 @@ import { ptyManager, hasClaudeHistory, lastSessionInfo } from '../lib/pty-manage
 import { vpsStateStore, KNOWN_CLIS } from '../lib/vps-state-store'
 import { VPS_HOSTS } from '../lib/ssh-inventory'
 import { logger } from '../lib/logger'
+import { auditAction } from '../lib/auth/audit'
 
 export function ptyRouter() {
   const router = Router()
@@ -28,9 +29,21 @@ export function ptyRouter() {
     })
   })
 
+  // Chiudere una sessione e' un'azione distruttiva su lavoro altrui: il terminale di un
+  // collega puo' avere Claude a meta' di un'implementazione. L'owner puo' su tutte (deve
+  // poter sbloccare la macchina), un guest solo sulle proprie.
   router.delete('/:projectId', (req, res) => {
     const id = req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, '')
     if (!id) return res.status(400).json({ error: 'invalid id' })
+    const session = ptyManager.get(id)
+    if (session && req.user?.role === 'guest' && session.ownerEmail !== req.user.email) {
+      auditAction(req, 'access.denied', {
+        method: 'DELETE',
+        path: `/pty/${id}`,
+        reason: 'sessione di un altro utente',
+      })
+      return res.status(403).json({ error: 'not_your_session' })
+    }
     const killed = ptyManager.kill(id)
     res.json({ ok: killed })
   })
