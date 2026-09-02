@@ -23,6 +23,7 @@ import LoginPage from '@/pages/Login'
 import EnrollTotpPage from '@/pages/EnrollTotp'
 import VerifyTotpPage from '@/pages/VerifyTotp'
 import SettingsAccessPage from '@/pages/SettingsAccess'
+import SettingsPermessiPage from '@/pages/SettingsPermessi'
 import { RequireAuth, RequireOwner } from '@/components/auth/RequireAuth'
 import { CommandPalette } from '@/components/addons/CommandPalette'
 import { useSSE } from '@/hooks/useSSE'
@@ -117,6 +118,14 @@ export default function App() {
             element={
               <RequireOwner>
                 <SettingsAccessPage />
+              </RequireOwner>
+            }
+          />
+          <Route
+            path="settings/permessi"
+            element={
+              <RequireOwner>
+                <SettingsPermessiPage />
               </RequireOwner>
             }
           />

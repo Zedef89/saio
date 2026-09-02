@@ -35,6 +35,11 @@ export type AuditEventType =
   | 'tmux.created'
   | 'tmux.killed'
   | 'tmux.account.switched'
+  // Il cancello: chi cambia una regola dei permessi, e chi decide una richiesta. Senza
+  // queste righe una concessione resta senza autore, e una concessione senza autore e'
+  // indistinguibile da un aggiramento.
+  | 'permessi.regola.modificata'
+  | 'permessi.richiesta.decisa'
 
 export interface AuditEvent {
   ts: string

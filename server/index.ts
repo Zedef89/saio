@@ -56,6 +56,7 @@ import { setBanStoreDataDir } from './lib/auth/ban-store'
 import { bootstrapAuth } from './lib/auth/bootstrap'
 import { authRouter } from './routes/auth'
 import { adminAccessRouter } from './routes/admin-access'
+import { adminPermessiRouter } from './routes/admin-permessi'
 import { systemRouter } from './routes/system'
 import { perfRouter } from './routes/perf'
 import { onboardingRouter } from './routes/onboarding'
@@ -267,6 +268,7 @@ app.use('/api/events', eventsRouter())
 
 // V15.0 WS3-3H — Admin access (owner-only)
 app.use('/api/admin/access', requireOwner, adminAccessRouter(DATA_DIR))
+app.use('/api/admin/permessi', requireOwner, adminPermessiRouter(DATA_DIR))
 
 // V15.0 WS10 — System checks (deps, tunnel status). Auth gated da umbrella.
 app.use('/api/system', systemRouter())

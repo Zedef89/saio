@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { useMe, useIsOwner, useLogout } from '@/hooks/useAuth'
-import { LogOut, UserCog, Globe, ScanLine } from 'lucide-react'
+import { LogOut, UserCog, Globe, ScanLine, ShieldCheck } from 'lucide-react'
 import { CloudflareSetupWizard } from '@/components/onboarding/CloudflareSetupWizard'
 import { AutoScanWizard } from '@/components/onboarding/AutoScanWizard'
 import { PtySessionsDialog } from '@/components/dialogs/PtySessionsDialog'
@@ -416,10 +416,16 @@ function OwnerAccessNav({ collapsed }: { collapsed: boolean }) {
     )
   }
   return (
-    <NavLink to="/settings/access" className={buttonClass}>
-      <UserCog className="w-4 h-4" />
-      <span>Access</span>
-    </NavLink>
+    <>
+      <NavLink to="/settings/access" className={buttonClass}>
+        <UserCog className="w-4 h-4" />
+        <span>Access</span>
+      </NavLink>
+      <NavLink to="/settings/permessi" className={buttonClass}>
+        <ShieldCheck className="w-4 h-4" />
+        <span>Permessi</span>
+      </NavLink>
+    </>
   )
 }
 

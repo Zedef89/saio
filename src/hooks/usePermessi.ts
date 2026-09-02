@@ -1,0 +1,84 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+
+export interface RegolaPermesso {
+  id: string
+  titolo: string
+  perche: string
+  invece: string
+  attiva: boolean
+  nota: string | null
+  /** I progetti in cui la regola vale. Vuoto = vale ovunque. */
+  progetti: string[]
+  esenti: string[]
+  valeOvunque: boolean
+}
+
+export interface RichiestaPermesso {
+  id: string
+  titolo: string
+  persona: string
+  sessione: string
+  cosa: string
+  dove: string
+  aperta: string
+  perche: string | null
+  prova: string | null
+}
+
+export interface StatoPermessi {
+  regole: RegolaPermesso[]
+  progetti: string[]
+  inAttesa: RichiestaPermesso[]
+  /** Blocchi in cui nessuno ha scritto il perché: sono aggiramenti silenziosi. */
+  abbozzate: number
+}
+
+export const PERMESSI_KEY = ['admin', 'permessi'] as const
+
+export function usePermessi() {
+  return useQuery({
+    queryKey: PERMESSI_KEY,
+    queryFn: async () => {
+      const res = await fetch('/api/admin/permessi', { credentials: 'include' })
+      if (!res.ok) throw new Error(`permessi ${res.status}`)
+      return (await res.json()) as StatoPermessi
+    },
+    refetchInterval: 30_000,
+  })
+}
+
+export function useModificaRegola() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (v: { id: string; attiva?: boolean; progetti?: string[]; esenti?: string[] }) => {
+      const { id, ...body } = v
+      const res = await fetch(`/api/admin/permessi/regole/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `errore ${res.status}`)
+      return res.json()
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: PERMESSI_KEY }),
+  })
+}
+
+export function useDecidiRichiesta() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (v: { id: string; approva: boolean; perche?: string; perSessione?: boolean }) => {
+      const { id, ...body } = v
+      const res = await fetch(`/api/admin/permessi/richieste/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `errore ${res.status}`)
+      return res.json() as Promise<{ ok: true; sessione: string }>
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: PERMESSI_KEY }),
+  })
+}
