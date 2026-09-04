@@ -33,6 +33,24 @@ export function setWaitingForUser(projectId: string, waiting: boolean): void {
   }
 }
 
+/**
+ * I progetti che questa persona puo' vedere.
+ *
+ * Il campo `persone` sul progetto e' l'interfaccia da cui l'owner decide (pagina Permessi).
+ * Qui si applica e basta — e si applica ai soli guest: chi amministra vede tutto, altrimenti
+ * si escluderebbe da solo dalla cosa che sta amministrando.
+ */
+async function filtraPerPersona(
+  progetti: ProjectEntry[],
+  user: { email: string; role: 'owner' | 'guest' } | undefined,
+): Promise<ProjectEntry[]> {
+  if (!user || user.role === 'owner') return progetti
+  const { ownerSlugForEmail } = await import('../lib/session-owner')
+  const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+  const slug = await ownerSlugForEmail(dataDir, user.email)
+  return progetti.filter((p) => !p.persone || p.persone.length === 0 || p.persone.includes(slug))
+}
+
 // Check if a PID is still alive (for task liveness detection)
 function isPidAlive(pid: number | undefined): boolean {
   if (!pid || typeof pid !== 'number' || pid <= 0) return false
@@ -241,10 +259,14 @@ export function projectsRouter(dataDir: string) {
   // ========================================================
   // GET / — list all (includes archived; client filters)
   // ========================================================
-  router.get('/', async (_req, res) => {
+  router.get('/', async (req, res) => {
     try {
       const all = await projectsStore.load()
-      const enriched = await Promise.all(all.map((p) => enrichWithSession(p, tasksDir)))
+      // Chi non amministra vede solo i progetti che gli sono stati dati. Un progetto senza
+      // `persone` resta visibile a tutti: la restrizione e' una decisione da prendere, non
+      // un default che scatta da solo su duecento progetti gia' registrati.
+      const visibili = await filtraPerPersona(all, req.user)
+      const enriched = await Promise.all(visibili.map((p) => enrichWithSession(p, tasksDir)))
       res.json({ projects: enriched })
     } catch (err) {
       logger.error('Projects fetch failed:', err)

@@ -40,6 +40,7 @@ export type AuditEventType =
   // indistinguibile da un aggiramento.
   | 'permessi.regola.modificata'
   | 'permessi.accesso.modificato'
+  | 'permessi.progetto.modificato'
   | 'permessi.richiesta.decisa'
 
 export interface AuditEvent {

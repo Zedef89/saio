@@ -12,6 +12,7 @@ import os from 'node:os'
 import { execFile, spawn as childSpawn, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import { TMUX_BIN } from './tmux-bin'
+import { personaUnix, envPerPersona, comeLaPersona, type PersonaUnix } from './persona-unix'
 import { logger } from './logger'
 import { VPS_HOSTS, type VpsHost } from './ssh-inventory'
 import type { Account } from '../../shared/schemas'
@@ -147,10 +148,17 @@ export function sessionNameFor(slug: string, projectName: string): string {
   return `${slug}-${projectName}`
 }
 
-/** `tmux has-session` sincrono: serve dentro la costruzione del nome, prima dello spawn. */
-function tmuxHasSessionSync(name: string): boolean {
+/**
+ * `tmux has-session` sincrono: serve dentro la costruzione del nome, prima dello spawn.
+ *
+ * `persona` dice su quale socket guardare: le sessioni di chi ha un utente suo stanno su
+ * `/tmp/tmux-<uid>/`, e cercarle da root risponderebbe sempre "non esiste" — con l'effetto
+ * di aggiungere un `-2`, `-3`… al nome a ogni apertura, invece di riattaccarsi.
+ */
+function tmuxHasSessionSync(name: string, persona?: PersonaUnix | null): boolean {
   try {
-    execFileSync(TMUX_BIN, ['has-session', '-t', `=${name}`], { stdio: 'ignore', timeout: 3000 })
+    const c = comeLaPersona(persona || null, [TMUX_BIN, 'has-session', '-t', `=${name}`])
+    execFileSync(c.file, c.args, { stdio: 'ignore', timeout: 3000 })
     return true
   } catch {
     return false
@@ -768,13 +776,31 @@ class PtyManager {
     // card→tmux (Nicola): per progetti normali con cartella ~/dev/<name>, la card apre/attacca
     // la sessione tmux omonima (nome = cartella, via hook ~/.zshrc). Attach se viva, altrimenti
     // crea + avvia claude. Sostituisce la vecchia patch hardcoded: generico, vale anche per progetti nuovi.
+    // Chi ha un utente Unix suo lavora nella SUA area (`/srv/taskless/<slug>/dev`), non in
+    // `/root/dev`: `/root` e' `700` e una sessione che non e' root non ci entra.
+    //
+    // Il suo tmux finisce da solo su un server separato: il socket e' `/tmp/tmux-<uid>/default`,
+    // quindi basta che il processo giri col suo uid — nessun `-L` da ricordarsi. Vale anche per
+    // le sessioni che apre a mano via SSH, che cosi' sono le stesse che vede in SAIO.
+    let __persona: PersonaUnix | null = null
+    if (!opts.remote) {
+      try {
+        __persona = await personaUnix(this.dataDir, opts.userEmail)
+      } catch (err: any) {
+        // Non si ricade su root: vedi la testa di persona-unix.ts.
+        logger.error(`[pty] ${projectId}: ${err?.message || err}`)
+        return { error: String(err?.message || err) }
+      }
+    }
+    const __devRoot = __persona ? __persona.devRoot : path.join(os.homedir(), 'dev')
+
     let __tmuxName: string | null = null
     if (projectId !== 'terminal' && !opts.remote) {
       try {
         const { projectsStore } = await import('./projects-store')
         const __p = await projectsStore.findById(projectId)
         const __nm = __p?.name
-        if (__nm && /^[a-zA-Z0-9._-]+$/.test(__nm) && fs.existsSync(path.join(os.homedir(), 'dev', __nm))) {
+        if (__nm && /^[a-zA-Z0-9._-]+$/.test(__nm) && fs.existsSync(path.join(__devRoot, __nm))) {
           __tmuxName = __nm
         }
       } catch { /* nessun progetto → fallback normale */ }
@@ -809,7 +835,7 @@ class PtyManager {
       // su un branch staccato dalla base: senza, due persone sullo stesso progetto si
       // cambierebbero il checkout a vicenda. Sull'istanza personale la variabile è assente e
       // il comportamento resta quello storico (working copy diretta, sessione per progetto).
-      let __dir = path.join(os.homedir(), 'dev', __tmuxName)
+      let __dir = path.join(__devRoot, __tmuxName)
       let __session = __tmuxName
       if (process.env.SAIO_ISOLATED_WORKTREES === 'true' && opts.userEmail) {
         const wt = await this.resolveWorktree(__dir, __tmuxName, opts)
@@ -825,6 +851,7 @@ class PtyManager {
       const __identityFile = await writeIdentityFile(
         process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'),
         opts.userEmail,
+        __persona ? path.join(__persona.area, '.saio') : undefined,
       )
       const __claudeCmd = withIdentityFile(
         claudeCommandWithPermissionMode('claude', opts.permissionMode),
@@ -923,6 +950,16 @@ class PtyManager {
     const shell = shellSpec.shellPath
     const shellArgs = shellSpec.args(effectiveCmd)
 
+    // La sessione di chi ha un utente suo parte COME quell'utente: e' qui che i permessi
+    // smettono di essere una convenzione. `node-pty` cambia uid/gid ma non l'ambiente, e il
+    // `cwd` di default sta sotto la dataDir (dentro `/root`, che e' `700`): lasciarlo com'e'
+    // farebbe fallire lo spawn con EACCES prima ancora di arrivare al comando.
+    const spawnCwd = __persona ? (fs.existsSync(__persona.devRoot) ? __persona.devRoot : __persona.home) : cwd
+    const spawnEnv = __persona ? envPerPersona(env, __persona) : env
+    if (__persona) {
+      logger.info(`[pty] ${projectId}: sessione come ${__persona.user} (uid=${__persona.uid}) cwd=${spawnCwd} tmux -L ${__persona.slug}`)
+    }
+
     let proc: pty.IPty
     try {
       proc = pty.spawn(
@@ -932,8 +969,9 @@ class PtyManager {
           name: 'xterm-color',
           cols: 100,
           rows: 30,
-          cwd,
-          env,
+          cwd: spawnCwd,
+          env: spawnEnv,
+          ...(__persona ? { uid: __persona.uid, gid: __persona.gid } : {}),
         }
       )
     } catch (err: any) {
@@ -1175,7 +1213,8 @@ class PtyManager {
     const s = this.sessions.get(projectId)
     if (!s?.tmuxBacked || !s.ptsName) return false
     try {
-      await execFileAsync(TMUX_BIN, ['refresh-client', '-t', s.ptsName], { timeout: 3000 })
+      const { tmuxSuSessione } = await import('./tmux-cmd')
+      await tmuxSuSessione(this.dataDir, s.tmuxSession || '', ['refresh-client', '-t', s.ptsName], { timeout: 3000 })
       return true
     } catch {
       // Client non ancora attaccato (tmux sta partendo) o sessione appena morta: non è

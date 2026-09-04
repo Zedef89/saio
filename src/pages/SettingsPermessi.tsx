@@ -14,10 +14,12 @@ import {
   usePermessi,
   useModificaRegola,
   useModificaAccesso,
+  useModificaProgetto,
   useDecidiRichiesta,
   type RegolaPermesso,
   type Accesso,
   type Persona,
+  type ProgettoVisibilita,
 } from '@/hooks/usePermessi'
 import { Button } from '@/components/ui/button'
 
@@ -165,6 +167,46 @@ function RigaAccesso({ a, persone }: { a: Accesso; persone: Persona[] }) {
   )
 }
 
+/** Una riga «questo progetto lo vede chi». Vuoto = lo vedono tutti. */
+function RigaProgetto({ p, persone }: { p: ProgettoVisibilita; persone: Persona[] }) {
+  const modifica = useModificaProgetto()
+  const tutti = p.persone.length === 0
+
+  function commuta(slug: string) {
+    const nuove = p.persone.includes(slug) ? p.persone.filter((s) => s !== slug) : [...p.persone, slug]
+    modifica.mutate({ id: p.id, persone: nuove })
+  }
+
+  return (
+    <div className="px-4 py-2.5 border-t border-border">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{p.nome}</div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {tutti ? 'lo vedono tutti' : `solo ${p.persone.join(', ')}`}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-3 shrink-0 justify-end">
+          {persone.map((x) => (
+            <label key={x.slug} className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={p.persone.includes(x.slug)}
+                disabled={modifica.isPending}
+                onChange={() => commuta(x.slug)}
+              />
+              {x.nome}
+            </label>
+          ))}
+        </div>
+      </div>
+      {modifica.isError && (
+        <div className="text-xs text-red-500 mt-1">{(modifica.error as Error).message}</div>
+      )}
+    </div>
+  )
+}
+
 export default function SettingsPermessiPage() {
   const { data, isLoading, error } = usePermessi()
   const decidi = useDecidiRichiesta()
@@ -250,6 +292,25 @@ export default function SettingsPermessiPage() {
           )}
           {data.regole.map((r) => (
             <Riga key={r.id} r={r} progetti={data.progetti} />
+          ))}
+        </div>
+      )}
+
+      {data && data.progettiVisibilita.length > 0 && (
+        <div className="border border-border rounded-lg bg-card overflow-hidden">
+          <div className="px-4 py-3">
+            <h2 className="text-sm font-semibold">Chi vede quale progetto</h2>
+            <p className="text-xs text-muted-foreground mt-1">
+              Un progetto senza nessuno spuntato <strong>lo vedono tutti</strong>: è com'era
+              prima, e restringere è una decisione da prendere, non qualcosa che scatta da
+              sola su {data.progettiVisibilita.length} progetti. Spuntando una persona, il
+              progetto diventa suo e sparisce agli altri invitati — chi amministra continua a
+              vedere tutto. Non si nasconde solo la card: la sessione non si apre nemmeno
+              indovinando l'indirizzo.
+            </p>
+          </div>
+          {data.progettiVisibilita.map((p) => (
+            <RigaProgetto key={p.id} p={p} persone={data.persone} />
           ))}
         </div>
       )}

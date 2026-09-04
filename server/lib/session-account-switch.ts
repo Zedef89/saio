@@ -109,10 +109,12 @@ async function stopClaude(session: string, pid: number): Promise<boolean> {
   const target = `=${session}:`
   // Esc chiude un eventuale menu/prompt aperto, poi /exit e' l'uscita pulita: salva il
   // transcript e restituisce la shell. Un kill secco lascerebbe la chat troncata.
-  await execFileAsync(TMUX_BIN, ['send-keys', '-t', target, 'Escape']).catch(() => {})
+  const { tmuxSuSessione } = await import('./tmux-cmd')
+  const dd = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+  await tmuxSuSessione(dd, session, ['send-keys', '-t', target, 'Escape']).catch(() => {})
   await new Promise((r) => setTimeout(r, 300))
-  await execFileAsync(TMUX_BIN, ['send-keys', '-t', target, '-l', '/exit']).catch(() => {})
-  await execFileAsync(TMUX_BIN, ['send-keys', '-t', target, 'Enter']).catch(() => {})
+  await tmuxSuSessione(dd, session, ['send-keys', '-t', target, '-l', '/exit']).catch(() => {})
+  await tmuxSuSessione(dd, session, ['send-keys', '-t', target, 'Enter']).catch(() => {})
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 250))
     try {
@@ -173,7 +175,12 @@ export async function switchSessionAccount(
   // pane della sessione → processo claude che ci gira dentro
   let panePid: number | null = null
   try {
-    const { stdout } = await execFileAsync(TMUX_BIN, ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'], { timeout: 4000 })
+    const { tmuxOvunque } = await import('./tmux-cmd')
+    const stdout = await tmuxOvunque(
+      process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'),
+      ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'],
+      { timeout: 4000 },
+    )
     for (const line of stdout.trim().split('\n')) {
       const [name, pid] = line.split('|')
       if (name === session) {
@@ -244,7 +251,8 @@ export async function switchSessionAccount(
     ),
     identityFile,
   )
-  await execFileAsync(TMUX_BIN, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'])
+  const { tmuxSuSessione: inviaA } = await import('./tmux-cmd')
+  await inviaA(process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'), session, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'])
   logger.info(`[switch-account] ${session}: ${fromSlot} → ${targetAccountId}${transcript ? ` (resume ${transcript})` : ' (chat nuova)'}`)
 
   return { ok: true, session, from: fromSlot, to: targetAccountId, transcript, cwd }

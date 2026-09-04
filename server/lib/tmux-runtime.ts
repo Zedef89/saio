@@ -20,6 +20,11 @@ import { logger } from './logger'
 
 const execFileAsync = promisify(execFile)
 
+/** La dataDir, per sapere chi ha un utente Unix suo (e quindi un socket tmux suo). */
+function DATA_DIR(): string {
+  return process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+}
+
 /**
  * `waiting` e' lo stato che conta di piu': Claude non sta lavorando e non ha finito — e' fermo
  * su una domanda e aspetta una risposta. Senza distinguerlo da `idle` la sessione sembra a posto
@@ -162,11 +167,12 @@ function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAcc
 }
 
 /** Sta elaborando? Si guarda la videata, non il carico: mentre aspetta l'API la CPU e' a zero. */
-export async function readActivity(session: string): Promise<SessionActivity> {
+export async function readActivity(session: string, dataDir = DATA_DIR()): Promise<SessionActivity> {
   try {
     // Il target va chiuso con i due punti (`=nome:`): senza, tmux non risolve la finestra corrente
     // della sessione e capture-pane torna vuoto — ogni sessione sembrerebbe una shell.
-    const { stdout } = await execFileAsync(TMUX_BIN, ['capture-pane', '-p', '-t', `=${session}:`], { timeout: 4000, maxBuffer: 2_000_000 })
+    const { tmuxSuSessione } = await import('./tmux-cmd')
+    const { stdout } = await tmuxSuSessione(dataDir, session, ['capture-pane', '-p', '-t', `=${session}:`], { timeout: 4000, maxBuffer: 2_000_000 })
     // Un menu del TUI blocca davvero la sessione: vale anche se in videata resta un
     // "esc to interrupt" di poco prima.
     if (looksLikeChoiceMenu(stdout)) return 'waiting'
@@ -187,14 +193,11 @@ export async function readActivity(session: string): Promise<SessionActivity> {
  * Non solleva mai: se qualcosa non e' leggibile, quella sessione resta senza dati extra e la
  * lista continua a funzionare come prima.
  */
-export async function sessionRuntimes(): Promise<Record<string, SessionRuntime>> {
+export async function sessionRuntimes(dataDir = DATA_DIR()): Promise<Record<string, SessionRuntime>> {
   const out: Record<string, SessionRuntime> = {}
   try {
-    const { stdout } = await execFileAsync(
-      TMUX_BIN,
-      ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'],
-      { timeout: 4000 }
-    )
+    const { tmuxOvunque } = await import('./tmux-cmd')
+    const stdout = await tmuxOvunque(dataDir, ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'], { timeout: 4000 })
     const panes = stdout
       .trim()
       .split('\n')

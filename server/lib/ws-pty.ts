@@ -168,6 +168,36 @@ async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promi
   return { ok: false }
 }
 
+/**
+ * Questo progetto e' fra quelli assegnati a questa persona?
+ *
+ * `terminal` e i `tmux-…` non sono progetti: sono il terminale condiviso e l'attacco a una
+ * sessione, che hanno gia' i loro controlli (`guestPtyAllowed`, `canActOnSession`).
+ */
+async function puoVedereProgetto(projectId: string, email: string | null | undefined): Promise<boolean> {
+  if (!email) return false
+  if (projectId === 'terminal' || projectId.startsWith('tmux-')) return true
+  try {
+    const [{ projectsStore }, { ownerSlugForEmail }] = await Promise.all([
+      import('./projects-store'),
+      import('./session-owner'),
+    ])
+    const p = await projectsStore.findById(projectId)
+    if (!p) return false
+    const persone = (p as { persone?: string[] }).persone
+    if (!persone || persone.length === 0) return true
+    const dataDir = process.env.DASHBOARD_DATA_DIR || pathJoinData()
+    return persone.includes(await ownerSlugForEmail(dataDir, email))
+  } catch {
+    // Un errore qui non deve aprire: chi non si riesce a verificare non entra.
+    return false
+  }
+}
+
+function pathJoinData(): string {
+  return `${process.cwd()}/data`
+}
+
 export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
   const wss = new WebSocketServer({ noServer: true })
 
@@ -208,6 +238,21 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
           return
         }
         const projectId = match[1]
+        // Un progetto che non gli e' stato dato non si apre nemmeno indovinandone l'id: il
+        // filtro sulla lista nasconde la card, questo chiude la porta. E' la stessa ragione
+        // per cui `requireOwner` sta sul mount e non solo nell'interfaccia.
+        if (auth.role === 'guest' && !(await puoVedereProgetto(projectId, auth.email))) {
+          void audit({
+            type: 'access.denied',
+            email: auth.email,
+            ip: upgradeIp(req),
+            userAgentHash: '',
+            meta: { path: url.split('?')[0], projectId, reason: 'progetto non assegnato' },
+          })
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
         const spawnOpts = parseSpawnOptions(url)
         // Identità di chi apre la sessione: decide worktree isolato e credenziali git.
         if (auth.email) spawnOpts.userEmail = auth.email

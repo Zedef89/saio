@@ -76,11 +76,22 @@ export function identityPrompt(person: { name: string; email: string }): string 
  * Restituisce null se non si sa chi e' collegato o se il percorso non e' passabile alla shell:
  * meglio una sessione senza la nota che un comando di spawn rotto.
  */
-export async function writeIdentityFile(dataDir: string, email: string | null | undefined): Promise<string | null> {
+export async function writeIdentityFile(
+  dataDir: string,
+  email: string | null | undefined,
+  /**
+   * Dove scrivere la nota, quando la dataDir non va bene.
+   *
+   * Serve per chi ha un utente Unix suo: la dataDir sta sotto `/root` (`700`), e la sua
+   * sessione — che root non e' — non riuscirebbe a leggere il file. Il sintomo sarebbe muto:
+   * `"$(cat …)"` diventa una stringa vuota e la sessione parte senza sapere chi ha davanti.
+   */
+  dirOverride?: string,
+): Promise<string | null> {
   if (!email || email === 'unknown') return null
   try {
     const identity = await getIdentity(dataDir, email)
-    const dir = identityDir(dataDir)
+    const dir = dirOverride || identityDir(dataDir)
     const file = path.join(dir, `${identity.slug}.md`)
     if (!SHELL_SAFE.test(file)) {
       logger.warn(`[identity] percorso non passabile alla shell, nota saltata: ${file}`)

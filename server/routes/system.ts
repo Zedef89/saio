@@ -193,7 +193,13 @@ export function systemRouter(): Router {
       // Separatore '|': il TAB non sopravvive al passaggio (i campi restavano incollati
       // e il nome sessione risultava "42_1_1_1784806212_/Users/...").
       const fmt = '#{session_name}|#{session_windows}|#{?session_attached,1,0}|#{session_created}|#{pane_current_path}'
-      const { stdout } = await execFileAsync(TMUX_BIN, ['list-sessions', '-F', fmt])
+      // Un `tmux list-sessions` vede solo il socket del proprio utente (`/tmp/tmux-<uid>/`):
+      // di root, quindi, solo le sessioni di root. Chi ha un utente separato ha il suo, e
+      // senza questo giro le sue sessioni non comparirebbero in SAIO — ci sono, ma invisibili.
+      // Ogni fonte e' isolata nel suo try: un utente senza server tmux esce con 1 ("no server
+      // running"), e prima bastava quello per svuotare tutta la lista.
+      const { tmuxOvunque } = await import('../lib/tmux-cmd')
+      const stdout = await tmuxOvunque(DATA_DIR(), ['list-sessions', '-F', fmt])
       // Su quale account gira ogni sessione e se sta lavorando: senza questi due dati la
       // lista non dice ne' quale sessione e' inutile aprire (account a limite finito) ne'
       // quale sta ancora scrivendo. Non blocca: se fallisce, le card restano come prima.
@@ -337,9 +343,8 @@ export function systemRouter(): Router {
 
       const paneToSession = new Map<number, string>()
       try {
-        const { stdout } = await execFileAsync(TMUX_BIN, [
-          'list-panes', '-a', '-F', '#{session_name}|#{pane_pid}',
-        ])
+        const { tmuxOvunque } = await import('../lib/tmux-cmd')
+        const stdout = await tmuxOvunque(DATA_DIR(), ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'])
         for (const line of stdout.trim().split('\n').filter(Boolean)) {
           const idx = line.lastIndexOf('|')
           if (idx > 0) {
@@ -412,9 +417,8 @@ export function systemRouter(): Router {
       // 1) mappa pane_pid -> sessione tmux
       const paneToSession = new Map<number, string>()
       try {
-        const { stdout } = await execFileAsync(TMUX_BIN, [
-          'list-panes', '-a', '-F', '#{session_name}|#{pane_pid}',
-        ])
+        const { tmuxOvunque } = await import('../lib/tmux-cmd')
+        const stdout = await tmuxOvunque(DATA_DIR(), ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'])
         for (const line of stdout.trim().split('\n').filter(Boolean)) {
           const idx = line.lastIndexOf('|')
           if (idx > 0) {
@@ -529,7 +533,8 @@ export function systemRouter(): Router {
       const { execFile } = await import('node:child_process')
       const { promisify } = await import('node:util')
       const execFileAsync = promisify(execFile)
-      await execFileAsync(TMUX_BIN, ['kill-session', '-t', `=${name}`])
+      const { tmuxSuSessione } = await import('../lib/tmux-cmd')
+      await tmuxSuSessione(DATA_DIR(), name, ['kill-session', '-t', `=${name}`])
       auditAction(req, 'tmux.killed', { name })
       res.json({ ok: true, killed: name })
     } catch (err) {
@@ -568,20 +573,34 @@ export function systemRouter(): Router {
 
       // Già viva? Non ricreare: il frontend ci si attacca e basta.
       try {
-        await execFileAsync(TMUX_BIN, ['has-session', '-t', `=${name}`])
+        const { tmuxSuSessione } = await import('../lib/tmux-cmd')
+        await tmuxSuSessione(DATA_DIR(), name, ['has-session', '-t', `=${name}`])
         res.json({ ok: true, name, created: false, alreadyExisted: true })
         return
       } catch {
         /* non esiste → si crea */
       }
 
-      let cwd = process.env.HOME || '/root'
+      // Chi ha un utente Unix suo apre la sessione COME quell'utente, e dentro la SUA area:
+      // il progetto e' registrato col percorso di chi l'ha importato (`/root/dev/…`), che per
+      // lei non e' nemmeno leggibile.
+      const { personaUnix, comeLaPersona, nellaSuaArea } = await import('../lib/persona-unix')
+      let persona = null
+      try {
+        persona = await personaUnix(DATA_DIR(), requester)
+      } catch (err) {
+        res.status(500).json({ error: 'persona_non_risolta', message: (err as Error).message })
+        return
+      }
+
+      let cwd = persona ? persona.devRoot : process.env.HOME || '/root'
       if (projectId) {
         const { projectsStore } = await import('../lib/projects-store')
         const project = await projectsStore.findById(projectId)
-        const p = (project as { path?: string } | null)?.path
+        const p0 = (project as { path?: string } | null)?.path
+        const p = p0 ? nellaSuaArea(persona, p0) : null
         if (!p || !fsSync.existsSync(p)) {
-          res.status(400).json({ error: 'project_dir_missing', path: p || null })
+          res.status(400).json({ error: 'project_dir_missing', path: p || p0 || null })
           return
         }
         cwd = p
@@ -611,20 +630,26 @@ export function systemRouter(): Router {
       // Chi apre la sessione lo sa gia' SAIO (utente autenticato): va detto anche alla CLI,
       // che altrimenti si presenta col titolare dell'abbonamento Anthropic.
       const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
-      claudeCmd = withIdentityFile(claudeCmd, await writeIdentityFile(DATA_DIR(), requester))
+      claudeCmd = withIdentityFile(
+        claudeCmd,
+        await writeIdentityFile(DATA_DIR(), requester, persona ? path.join(persona.area, '.saio') : undefined),
+      )
 
-      await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', name, '-c', cwd])
+      const nuova = comeLaPersona(persona, [TMUX_BIN, 'new-session', '-d', '-s', name, '-c', cwd])
+      await execFileAsync(nuova.file, nuova.args)
       if (startClaude) {
-        await execFileAsync(TMUX_BIN, ['send-keys', '-t', name, claudeCmd, 'Enter'])
+        const invio = comeLaPersona(persona, [TMUX_BIN, 'send-keys', '-t', name, claudeCmd, 'Enter'])
+        await execFileAsync(invio.file, invio.args)
       }
       if (startClaude) {
         logger.info(`[tmux] "${name}": claude con perm=${resolvePermissionMode()}`)
       }
 
       logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ` (+claude account=${accountLabel})` : ''}`)
-      // Una sessione = un terminale root su questa macchina: e' l'azione piu' pesante che
-      // l'interfaccia permette, e va nell'audit anche quando va tutto bene.
-      auditAction(req, 'tmux.created', { name, cwd, projectId, account: startClaude ? accountLabel : null })
+      // Una sessione = un terminale su questa macchina, root per chi non ha un utente suo:
+      // e' l'azione piu' pesante che l'interfaccia permette, e va nell'audit anche quando va
+      // tutto bene. `utente` dice con quale identita' e' partita davvero.
+      auditAction(req, 'tmux.created', { name, cwd, projectId, utente: persona?.user || 'root', account: startClaude ? accountLabel : null })
       res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })

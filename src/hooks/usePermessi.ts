@@ -35,6 +35,13 @@ export interface Accesso {
   persone: string[] | 'tutti'
 }
 
+/** Un progetto e chi lo vede. Lista vuota = lo vedono tutti. */
+export interface ProgettoVisibilita {
+  id: string
+  nome: string
+  persone: string[]
+}
+
 export interface Persona {
   slug: string
   nome: string
@@ -47,6 +54,7 @@ export interface StatoPermessi {
   /** Blocchi in cui nessuno ha scritto il perché: sono aggiramenti silenziosi. */
   abbozzate: number
   accessi: Accesso[]
+  progettiVisibilita: ProgettoVisibilita[]
   persone: Persona[]
 }
 
@@ -88,6 +96,28 @@ export function useModificaAccesso() {
   return useMutation({
     mutationFn: async (v: { nome: string; persone: string[] | 'tutti' }) => {
       const res = await fetch(`/api/admin/permessi/accessi/${encodeURIComponent(v.nome)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persone: v.persone }),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `errore ${res.status}`)
+      return res.json()
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: PERMESSI_KEY }),
+  })
+}
+
+/**
+ * Chi vede un progetto. Lista vuota = lo vedono tutti — non "nessuno": un progetto che non
+ * si vede piu' non si riapre dall'interfaccia, e restringere tutto per sbaglio con una
+ * spunta sarebbe troppo facile.
+ */
+export function useModificaProgetto() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (v: { id: string; persone: string[] }) => {
+      const res = await fetch(`/api/admin/permessi/progetti/${encodeURIComponent(v.id)}`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },

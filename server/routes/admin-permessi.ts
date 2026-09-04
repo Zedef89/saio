@@ -152,6 +152,20 @@ export function adminPermessiRouter(dataDir: string): Router {
         valeOvunque: !r.quando.dove,
       })),
       progetti,
+      // Chi vede quale PROGETTO. Separato da `progetti` (che e' solo l'elenco dei nomi, usato
+      // per dire dove vale una regola del cancello): qui serve l'id, perche' e' su quello che
+      // si scrive.
+      progettiVisibilita: await (async () => {
+        try {
+          const { projectsStore } = await import('../lib/projects-store')
+          return (await projectsStore.load())
+            .filter((x) => !x.archived)
+            .map((x) => ({ id: x.id, nome: x.name, persone: x.persone || [] }))
+            .sort((a, b) => a.nome.localeCompare(b.nome))
+        } catch {
+          return []
+        }
+      })(),
       inAttesa: richieste.richieste.filter((x) => x.stato === 'aperta'),
       abbozzate: richieste.richieste.filter((x) => x.stato === 'abbozzata').length,
       accessi: Object.entries(accessi.accessi || {})
@@ -251,6 +265,43 @@ export function adminPermessiRouter(dataDir: string): Router {
     }).catch((err) => logger.error('[permessi] audit fallito:', err))
 
     res.json({ ok: true, persone: voce.persone })
+  })
+
+  // ─────────────────── CHI VEDE QUALE PROGETTO ───────────────────
+  //
+  // Lista vuota = lo vedono tutti. E' il comportamento storico, e resta il default sui
+  // progetti gia' registrati: restringere e' una decisione, non un effetto collaterale.
+  router.patch('/progetti/:id', async (req: Request, res: Response): Promise<void> => {
+    const parsed = PatchAccesso.safeParse(req.body)
+    if (!parsed.success || !Array.isArray(parsed.data.persone)) {
+      res.status(400).json({ error: 'payload non valido: serve persone[]' })
+      return
+    }
+    const id = String(req.params.id)
+    const { projectsStore } = await import('../lib/projects-store')
+    const progetto = await projectsStore.findById(id)
+    if (!progetto) {
+      res.status(404).json({ error: 'progetto sconosciuto' })
+      return
+    }
+    // Stessa regola degli accessi: uno slug fuori anagrafica darebbe un permesso che non si
+    // applica mai — un interruttore acceso senza niente dietro.
+    const noti = new Set((await persone()).map((p) => p.slug))
+    const ignoti = parsed.data.persone.filter((s) => !noti.has(s))
+    if (ignoti.length) {
+      res.status(400).json({ error: `persone non in anagrafica: ${ignoti.join(', ')}`, noti: [...noti] })
+      return
+    }
+    const nuove = [...new Set(parsed.data.persone)].sort()
+    await projectsStore.update(id, { persone: nuove })
+    await audit({
+      type: 'permessi.progetto.modificato',
+      email: req.user?.email,
+      ip: getClientIp(req),
+      userAgentHash: hashUserAgent(req),
+      meta: { progetto: id, persone: nuove.length ? nuove : 'tutti' },
+    }).catch((err) => logger.error('[permessi] audit fallito:', err))
+    res.json({ ok: true, persone: nuove })
   })
 
   // ─────────────────── DECIDI UNA RICHIESTA ───────────────────

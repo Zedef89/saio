@@ -155,6 +155,14 @@ export const ProjectSchema = z.object({
   // V13 — per-project AI account override
   accountOverride: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).nullable().optional(),
   modelOverride: z.string().max(100).nullable().optional(),
+  /**
+   * Chi vede questo progetto, per slug (`["marco"]`).
+   *
+   * Assente = lo vedono tutti, che e' il comportamento storico e resta quello per i progetti
+   * gia' registrati. Vale solo per chi NON amministra: un owner vede tutto, perche' e' lui
+   * che decide chi vede cosa.
+   */
+  persone: z.array(z.string().regex(/^[a-z][a-z0-9-]{1,23}$/)).max(50).optional(),
   // V14 — spawn target: 'local' | <vpsId>. Override del target dell'account.
   // Se assente o null → eredita da account.target → fallback 'local'.
   spawnTarget: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).nullable().optional(),
