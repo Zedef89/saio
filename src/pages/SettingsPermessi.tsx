@@ -13,8 +13,11 @@ import { useState } from 'react'
 import {
   usePermessi,
   useModificaRegola,
+  useModificaAccesso,
   useDecidiRichiesta,
   type RegolaPermesso,
+  type Accesso,
+  type Persona,
 } from '@/hooks/usePermessi'
 import { Button } from '@/components/ui/button'
 
@@ -97,6 +100,67 @@ function Riga({ r, progetti }: { r: RegolaPermesso; progetti: string[] }) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Una riga per accesso, una colonna per persona: si spunta chi lo vede.
+ *
+ * Chi amministra non ha una colonna, e non e' una dimenticanza: vede tutto per
+ * definizione, come per il cancello. Quello che si decide qui riguarda chi entra dopo.
+ */
+function RigaAccesso({ a, persone }: { a: Accesso; persone: Persona[] }) {
+  const modifica = useModificaAccesso()
+  const tutti = a.persone === 'tutti'
+  const scelte = tutti ? [] : (a.persone as string[])
+
+  function commuta(slug: string) {
+    const nuove = scelte.includes(slug) ? scelte.filter((s) => s !== slug) : [...scelte, slug]
+    modifica.mutate({ nome: a.nome, persone: nuove })
+  }
+
+  return (
+    <div className="px-4 py-3 border-t border-border">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium font-mono">{a.nome}</div>
+          <div className="text-xs text-muted-foreground mt-0.5">{a.apre}</div>
+          {a.avviso && <div className="text-xs text-amber-500 mt-1">⚠ {a.avviso}</div>}
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground shrink-0">
+          <input
+            type="checkbox"
+            checked={tutti}
+            disabled={modifica.isPending}
+            onChange={(e) => modifica.mutate({ nome: a.nome, persone: e.target.checked ? 'tutti' : [] })}
+          />
+          di tutti
+        </label>
+      </div>
+      {!tutti && (
+        <div className="flex flex-wrap gap-3 mt-2">
+          {persone.length === 0 && (
+            <span className="text-xs text-muted-foreground">
+              Nessuna persona in anagrafica oltre a chi amministra.
+            </span>
+          )}
+          {persone.map((p) => (
+            <label key={p.slug} className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={scelte.includes(p.slug)}
+                disabled={modifica.isPending}
+                onChange={() => commuta(p.slug)}
+              />
+              {p.nome}
+            </label>
+          ))}
+        </div>
+      )}
+      {modifica.isError && (
+        <div className="text-xs text-red-500 mt-1">{(modifica.error as Error).message}</div>
+      )}
     </div>
   )
 }
@@ -190,6 +254,23 @@ export default function SettingsPermessiPage() {
         </div>
       )}
 
+      {data && (
+        <div className="border border-border rounded-lg bg-card overflow-hidden">
+          <div className="px-4 py-3">
+            <h2 className="text-sm font-semibold">Chi vede quale accesso</h2>
+            <p className="text-xs text-muted-foreground mt-1">
+              Chiavi, token e connessioni al database: {data.accessi.length} in tutto. Chi
+              amministra li vede tutti e non compare qui. <strong>Chi entra nuovo parte
+              senza niente</strong> e i permessi glieli si danno uno per uno — è l'unico
+              default che non regala accessi per distrazione.
+            </p>
+          </div>
+          {data.accessi.map((a) => (
+            <RigaAccesso key={a.nome} a={a} persone={data.persone} />
+          ))}
+        </div>
+      )}
+
       {data && data.abbozzate > 0 && (
         <p className="text-xs text-muted-foreground">
           {data.abbozzate} blocchi non sono mai diventati una richiesta: nessuno ha scritto
@@ -199,10 +280,12 @@ export default function SettingsPermessiPage() {
       )}
 
       <p className="text-xs text-muted-foreground border-t border-border pt-4">
-        Queste regole non sono un confine di sicurezza: tutto gira come root e l'hook
-        fallisce aperto di proposito, perché un hook rotto non deve fermare il lavoro di
-        nessuno. Servono a far emergere quello che oggi succede in silenzio. Il confine vero
-        resta un utente di sistema separato per persona.
+        Niente di questa pagina è un confine di sicurezza, ed è meglio saperlo: tutto gira
+        come root, l'hook del cancello fallisce aperto di proposito — un hook rotto non deve
+        fermare il lavoro di nessuno — e chi ha una shell può aprire un <code>.env</code> a
+        mano, senza passare da qui. Serve a rendere la strada giusta più comoda di quella
+        sbagliata, e a far emergere ciò che oggi succede in silenzio. Il confine vero è un
+        utente di sistema separato per persona.
       </p>
     </div>
   )

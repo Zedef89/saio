@@ -25,12 +25,29 @@ export interface RichiestaPermesso {
   prova: string | null
 }
 
+/** Una voce del banco degli accessi. Mai il valore: solo il nome e cosa apre. */
+export interface Accesso {
+  nome: string
+  apre: string
+  ambito: string
+  avviso: string | null
+  /** Chi lo vede OLTRE a chi amministra. `'tutti'` = non è di nessuno. */
+  persone: string[] | 'tutti'
+}
+
+export interface Persona {
+  slug: string
+  nome: string
+}
+
 export interface StatoPermessi {
   regole: RegolaPermesso[]
   progetti: string[]
   inAttesa: RichiestaPermesso[]
   /** Blocchi in cui nessuno ha scritto il perché: sono aggiramenti silenziosi. */
   abbozzate: number
+  accessi: Accesso[]
+  persone: Persona[]
 }
 
 export const PERMESSI_KEY = ['admin', 'permessi'] as const
@@ -57,6 +74,24 @@ export function useModificaRegola() {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `errore ${res.status}`)
+      return res.json()
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: PERMESSI_KEY }),
+  })
+}
+
+/** Chi vede un accesso. La lista sostituisce quella precedente, non si somma. */
+export function useModificaAccesso() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (v: { nome: string; persone: string[] | 'tutti' }) => {
+      const res = await fetch(`/api/admin/permessi/accessi/${encodeURIComponent(v.nome)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persone: v.persone }),
       })
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `errore ${res.status}`)
       return res.json()

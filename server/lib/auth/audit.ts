@@ -39,6 +39,7 @@ export type AuditEventType =
   // queste righe una concessione resta senza autore, e una concessione senza autore e'
   // indistinguibile da un aggiramento.
   | 'permessi.regola.modificata'
+  | 'permessi.accesso.modificato'
   | 'permessi.richiesta.decisa'
 
 export interface AuditEvent {

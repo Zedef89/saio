@@ -66,6 +66,20 @@ const Patch = z.object({
   esenti: z.array(z.string().max(60)).max(20).optional(),
 })
 
+/** Una voce del banco degli accessi. Il registro contiene PUNTATORI, mai valori. */
+interface Accesso {
+  apre: string
+  ambito?: string
+  avviso?: string
+  attenzione?: string
+  persone?: string[] | 'tutti'
+  origine: { tipo: string; file: string; variabile?: string }
+}
+
+const PatchAccesso = z.object({
+  persone: z.union([z.literal('tutti'), z.array(z.string().max(60)).max(40)]),
+})
+
 const Decisione = z.object({
   approva: z.boolean(),
   perche: z.string().max(600).optional(),
@@ -90,6 +104,18 @@ export function adminPermessiRouter(dataDir: string): Router {
   const fileRegole = path.join(dataDir, 'cancello', 'regole.json')
   const fileRichieste = path.join(dataDir, 'cancello', 'richieste.json')
   const fileConcessioni = path.join(dataDir, 'cancello', 'concessioni.json')
+  const fileAccessi = path.join(dataDir, 'access', 'registro.json')
+  const fileIdentita = path.join(dataDir, 'git-identities.json')
+
+  /** L'anagrafica: e' la stessa da cui il cancello e il banco risolvono l'identita'.
+   *  Un permesso a uno slug che non e' qui non si applicherebbe mai. */
+  async function persone(): Promise<{ slug: string; nome: string }[]> {
+    const ident = await leggi<Record<string, { slug?: string; name?: string }>>(fileIdentita, {})
+    return Object.values(ident)
+      .filter((v) => v.slug)
+      .map((v) => ({ slug: v.slug as string, nome: v.name || (v.slug as string) }))
+      .sort((a, b) => a.slug.localeCompare(b.slug))
+  }
 
   async function leggi<T>(file: string, vuoto: T): Promise<T> {
     try {
@@ -103,6 +129,8 @@ export function adminPermessiRouter(dataDir: string): Router {
   router.get('/', async (_req, res) => {
     const regole = await leggi<{ regole: Regola[] }>(fileRegole, { regole: [] })
     const richieste = await leggi<{ richieste: Richiesta[] }>(fileRichieste, { richieste: [] })
+    const accessi = await leggi<{ accessi: Record<string, Accesso> }>(fileAccessi, { accessi: {} })
+    const elenco = await persone()
     let progetti: string[] = []
     try {
       const p = JSON.parse(await fsp.readFile(path.join(dataDir, 'projects.json'), 'utf8'))
@@ -126,6 +154,17 @@ export function adminPermessiRouter(dataDir: string): Router {
       progetti,
       inAttesa: richieste.richieste.filter((x) => x.stato === 'aperta'),
       abbozzate: richieste.richieste.filter((x) => x.stato === 'abbozzata').length,
+      accessi: Object.entries(accessi.accessi || {})
+        .map(([nome, v]) => ({
+          nome,
+          apre: v.apre,
+          ambito: v.ambito || 'altro',
+          avviso: v.avviso || v.attenzione || null,
+          // Chi lo vede OLTRE a chi amministra. Gli owner vedono tutto per definizione.
+          persone: v.persone === 'tutti' ? 'tutti' : (v.persone || []),
+        }))
+        .sort((a, b) => a.nome.localeCompare(b.nome)),
+      persone: elenco,
     })
   })
 
@@ -161,6 +200,57 @@ export function adminPermessiRouter(dataDir: string): Router {
     }).catch((err) => logger.error('[permessi] audit fallito:', err))
 
     res.json({ ok: true })
+  })
+
+  // ─────────────────── CHI VEDE QUALE ACCESSO ───────────────────
+  //
+  // Il registro dice cosa esiste; questa rotta dice a CHI. Non tocca mai i valori: il
+  // registro contiene puntatori (quale file, quale variabile), e neanche quelli escono da
+  // qui — al pannello bastano il nome e cosa apre.
+  router.patch('/accessi/:nome', async (req: Request, res: Response): Promise<void> => {
+    const parsed = PatchAccesso.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'payload non valido' })
+      return
+    }
+    const nome = String(req.params.nome)
+    const store = await leggi<{ accessi: Record<string, Accesso> }>(fileAccessi, { accessi: {} })
+    const voce = store.accessi?.[nome]
+    if (!voce) {
+      res.status(404).json({ error: 'accesso sconosciuto' })
+      return
+    }
+    const { persone: nuove } = parsed.data
+    if (Array.isArray(nuove)) {
+      // Uno slug fuori anagrafica produrrebbe un permesso che non si applica mai:
+      // sembra dato e non da' niente. Si rifiuta invece di scriverlo.
+      const noti = new Set((await persone()).map((p) => p.slug))
+      const ignoti = nuove.filter((s) => !noti.has(s))
+      if (ignoti.length) {
+        res.status(400).json({
+          error: `persone non in anagrafica: ${ignoti.join(', ')}`,
+          noti: [...noti],
+        })
+        return
+      }
+      voce.persone = [...new Set(nuove)].sort()
+    } else {
+      voce.persone = 'tutti'
+    }
+
+    await atomicWriteFile(fileAccessi, JSON.stringify(store, null, 2))
+    await audit({
+      type: 'permessi.accesso.modificato',
+      email: req.user?.email,
+      ip: getClientIp(req),
+      userAgentHash: hashUserAgent(req),
+      meta: {
+        accesso: nome,
+        persone: voce.persone === 'tutti' ? 'tutti' : voce.persone.length,
+      },
+    }).catch((err) => logger.error('[permessi] audit fallito:', err))
+
+    res.json({ ok: true, persone: voce.persone })
   })
 
   // ─────────────────── DECIDI UNA RICHIESTA ───────────────────
