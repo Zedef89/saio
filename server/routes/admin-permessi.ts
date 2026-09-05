@@ -182,6 +182,53 @@ export function adminPermessiRouter(dataDir: string): Router {
     })
   })
 
+  /**
+   * Il permesso anche SUL DISCO, non solo nel registro.
+   *
+   * Da quando una persona ha un utente Unix suo, il file col valore (di root) non le e'
+   * leggibile: la spunta qui la marcherebbe autorizzata, e poi `saio-run` le risponderebbe
+   * «permesso negato». Sarebbe un interruttore acceso senza niente dietro — lo stesso
+   * difetto gia' trovato due volte in questo progetto.
+   *
+   * Si usa una ACL sul singolo file perche' il gruppo `taskless` e' uno solo e non distingue
+   * una persona dall'altra, mentre qui serve esattamente quello. La stessa cosa la fa
+   * `saio-accessi concedi` da riga di comando.
+   */
+  async function aggiornaAcl(voce: Accesso, prima: string[], dopo: string[]): Promise<string[]> {
+    const avvisi: string[] = []
+    const org = (voce as { origine?: { tipo?: string; file?: string } }).origine
+    const ident = await leggi<Record<string, { slug?: string; unixUser?: string }>>(fileIdentita, {})
+    const utenteDi = (slug: string) => Object.values(ident).find((v) => v.slug === slug)?.unixUser
+    const cambiati = [...new Set([...prima, ...dopo])].filter((s) => prima.includes(s) !== dopo.includes(s))
+    if (cambiati.length === 0) return avvisi
+    if (org?.tipo !== 'env-file' || !org.file) {
+      if (cambiati.some((s) => utenteDi(s))) {
+        avvisi.push('il valore non sta in un file di ambiente: va consegnato a mano')
+      }
+      return avvisi
+    }
+    if (org.file.startsWith('/root/')) {
+      if (cambiati.some((s) => utenteDi(s))) {
+        avvisi.push(`il valore sta in ${org.file}, dentro /root: chi ha un utente suo non ci arriva. Va spostato in /srv/taskless/segreti/`)
+      }
+      return avvisi
+    }
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    for (const slug of cambiati) {
+      const utente = utenteDi(slug)
+      if (!utente) continue // chi non ha un utente separato gira come root: legge comunque
+      const args = dopo.includes(slug) ? ['-m', `u:${utente}:r`] : ['-x', `u:${utente}`]
+      try {
+        await run('setfacl', [...args, org.file])
+      } catch (err) {
+        avvisi.push(`ACL non applicata per ${slug}: ${(err as Error).message}`)
+      }
+    }
+    return avvisi
+  }
+
   // ─────────────────── MODIFICA UNA REGOLA ───────────────────
   router.patch('/regole/:id', async (req: Request, res: Response): Promise<void> => {
     const parsed = Patch.safeParse(req.body)
@@ -234,6 +281,8 @@ export function adminPermessiRouter(dataDir: string): Router {
       res.status(404).json({ error: 'accesso sconosciuto' })
       return
     }
+    // Chi ce l'aveva PRIMA: serve per sapere a chi togliere l'ACL, non solo a chi darla.
+    const prima = voce.persone === 'tutti' || !Array.isArray(voce.persone) ? [] : [...voce.persone]
     const { persone: nuove } = parsed.data
     if (Array.isArray(nuove)) {
       // Uno slug fuori anagrafica produrrebbe un permesso che non si applica mai:
@@ -251,6 +300,8 @@ export function adminPermessiRouter(dataDir: string): Router {
     } else {
       voce.persone = 'tutti'
     }
+    const dopo = voce.persone === 'tutti' ? [] : voce.persone
+    const avvisi = await aggiornaAcl(voce, prima, dopo)
 
     await atomicWriteFile(fileAccessi, JSON.stringify(store, null, 2))
     await audit({
@@ -264,7 +315,7 @@ export function adminPermessiRouter(dataDir: string): Router {
       },
     }).catch((err) => logger.error('[permessi] audit fallito:', err))
 
-    res.json({ ok: true, persone: voce.persone })
+    res.json({ ok: true, persone: voce.persone, avvisi })
   })
 
   // ─────────────────── CHI VEDE QUALE PROGETTO ───────────────────

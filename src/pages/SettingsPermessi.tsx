@@ -163,6 +163,11 @@ function RigaAccesso({ a, persone }: { a: Accesso; persone: Persona[] }) {
       {modifica.isError && (
         <div className="text-xs text-red-500 mt-1">{(modifica.error as Error).message}</div>
       )}
+      {/* Il permesso vale sul disco, non solo qui: se qualcosa non ha potuto aprirlo davvero,
+          va detto subito — un accesso spuntato che poi non funziona è peggio di uno negato. */}
+      {(modifica.data as { avvisi?: string[] } | undefined)?.avvisi?.map((a) => (
+        <div key={a} className="text-xs text-amber-500 mt-1">⚠ {a}</div>
+      ))}
     </div>
   )
 }
