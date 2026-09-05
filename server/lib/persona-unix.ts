@@ -24,6 +24,7 @@
  * che e' andata bene, e sarebbe l'ennesima protezione che esiste solo come frase in un campo
  * di testo. Meglio una sessione che non parte, e si vede subito.
  */
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -31,6 +32,9 @@ import { getIdentity } from './worktree'
 
 /** Dove vivono gli ambienti delle persone con utente separato. */
 export const AREA_ROOT = process.env.SAIO_AREA_ROOT || '/srv/taskless'
+
+/** Dove vivono le configurazioni dei cinque account Claude, fuori da `/root`. */
+export const ACCOUNT_ROOT = process.env.SAIO_ACCOUNT_ROOT || '/srv/taskless/account-claude'
 
 export interface PersonaUnix {
   slug: string
@@ -102,16 +106,57 @@ export async function personaUnix(dataDir: string, email: string | null | undefi
  * gira come `marco` con `HOME=/root`, cioe' non riesce a scrivere niente e Claude non trova la
  * sua configurazione. Il sintomo e' un terminale che si apre e non fa nulla.
  */
-export function envPerPersona(base: NodeJS.ProcessEnv, p: PersonaUnix): NodeJS.ProcessEnv {
-  return {
-    ...base,
-    HOME: p.home,
-    USER: p.user,
-    LOGNAME: p.user,
-    SHELL: base.SHELL || '/bin/bash',
-    // Il PATH di root contiene percorsi sotto /root che per lei non esistono.
-    PATH: base.PATH?.split(':').filter((d) => !d.startsWith('/root/')).join(':') || '/usr/local/bin:/usr/bin:/bin',
+/**
+ * La configurazione di un account Claude, ma nella cartella di QUESTA persona.
+ *
+ * I cinque abbonamenti sono in comune (`/srv/taskless/account-claude/.claude-b`), ma quella
+ * cartella non e' un posto dove farla lavorare: dentro ci sono i transcript di tutte le
+ * sessioni di chi c'era prima — ed e' li' che finiscono le chiavi di produzione lette a
+ * schermo. Quindi le si da' una config dir sua (`/srv/taskless/marco/.claude-b`), con dentro
+ * un collegamento al SOLO file delle credenziali: usa l'abbonamento, non legge il lavoro
+ * degli altri, e i suoi transcript restano suoi.
+ *
+ * Se il percorso non e' quello di un account condiviso, torna com'e'.
+ */
+export function configPerPersona(p: PersonaUnix | null, configDir: string): string {
+  if (!p) return configDir
+  let vero = configDir
+  try {
+    vero = fs.realpathSync(configDir)
+  } catch {
+    /* non esiste ancora: si lavora sul percorso cosi' com'e' */
   }
+  const base = ACCOUNT_ROOT + path.sep
+  if (!vero.startsWith(base)) return configDir
+  const nome = vero.slice(base.length).split(path.sep)[0]
+  return path.join(p.area, nome)
+}
+
+export function envPerPersona(base: NodeJS.ProcessEnv, p: PersonaUnix): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...base }
+  for (const [k, v] of Object.entries(base)) {
+    if (!v || !v.startsWith('/root/')) continue
+    // SAIO gira come root e si porta dietro percorsi dentro `/root`, che e' `700`. Molti sono
+    // symlink verso una cartella condivisa (`/srv/taskless/…`): quelli si riscrivono al
+    // percorso vero, cosi' funzionano per lei. Gli altri si TOLGONO invece di lasciarli
+    // rotti: quasi sempre il programma ha un default giusto, mentre una variabile che punta
+    // dove lei non arriva produce un errore che sembra tutt'altro — «registro assente»
+    // invece di «non puoi leggerlo». Successo davvero, al primo collaudo.
+    let vero: string | null = null
+    try {
+      vero = fs.realpathSync(v)
+    } catch {
+      vero = null
+    }
+    if (vero && !vero.startsWith('/root/')) out[k] = k === 'CLAUDE_CONFIG_DIR' ? configPerPersona(p, vero) : vero
+    else delete out[k]
+  }
+  out.HOME = p.home
+  out.USER = p.user
+  out.LOGNAME = p.user
+  out.SHELL = base.SHELL || '/bin/bash'
+  out.PATH = base.PATH?.split(':').filter((d) => !d.startsWith('/root/')).join(':') || '/usr/local/bin:/usr/bin:/bin'
+  return out
 }
 
 /**

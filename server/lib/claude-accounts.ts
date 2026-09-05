@@ -191,8 +191,22 @@ async function discoverSlots(): Promise<AccountSlot[]> {
   try {
     const entries = await fs.readdir(HOME, { withFileTypes: true })
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      // solo cartelle: in home ci sono anche `.claude.json` e i suoi backup
-      const match = entry.isDirectory() ? /^\.claude-([a-zA-Z0-9_-]+)$/.exec(entry.name) : null
+      // Solo cartelle: in home ci sono anche `.claude.json` e i suoi backup. Un symlink a
+      // una cartella conta come cartella — `isDirectory()` su una dirent e' falso per i
+      // symlink, e da quando le config vivono in `/srv/taskless/account-claude` (con un
+      // symlink da `/root`) quel controllo da solo faceva sparire quattro account su cinque.
+      const nome = /^\.claude-([a-zA-Z0-9_-]+)$/.exec(entry.name)
+      let match: RegExpExecArray | null = null
+      if (nome) {
+        if (entry.isDirectory()) match = nome
+        else if (entry.isSymbolicLink()) {
+          try {
+            match = (await fs.stat(path.join(HOME, entry.name))).isDirectory() ? nome : null
+          } catch {
+            match = null
+          }
+        }
+      }
       if (match) slots.push({ id: match[1], configDir: path.join(HOME, entry.name), isDefault: false })
     }
   } catch {

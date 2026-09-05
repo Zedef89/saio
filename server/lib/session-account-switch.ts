@@ -171,6 +171,15 @@ export async function switchSessionAccount(
 ): Promise<SwitchResult | SwitchError> {
   const destDir = await configDirForAccount(targetAccountId)
   if (!destDir) return { ok: false, code: 'unknown_account', message: `account sconosciuto: ${targetAccountId}` }
+  // Se la sessione e' di una persona con un utente suo, l'account si cambia dentro la SUA
+  // config, non in quella condivisa — altrimenti la sessione ripartirebbe scrivendo in una
+  // cartella che non le appartiene, e senza permesso di scriverci.
+  const { fonteDellaSessione } = await import('./tmux-cmd')
+  const { configPerPersona } = await import('./persona-unix')
+  const config = configPerPersona(
+    await fonteDellaSessione(process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'), session),
+    destDir,
+  )
 
   // pane della sessione → processo claude che ci gira dentro
   let panePid: number | null = null
@@ -246,8 +255,8 @@ export async function switchSessionAccount(
   const cmd = withIdentityFile(
     withPermissionMode(
       transcript
-        ? `CLAUDE_CONFIG_DIR='${destDir}' claude --resume ${transcript}`
-        : `CLAUDE_CONFIG_DIR='${destDir}' claude`
+        ? `CLAUDE_CONFIG_DIR='${config}' claude --resume ${transcript}`
+        : `CLAUDE_CONFIG_DIR='${config}' claude`
     ),
     identityFile,
   )

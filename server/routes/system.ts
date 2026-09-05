@@ -584,7 +584,7 @@ export function systemRouter(): Router {
       // Chi ha un utente Unix suo apre la sessione COME quell'utente, e dentro la SUA area:
       // il progetto e' registrato col percorso di chi l'ha importato (`/root/dev/…`), che per
       // lei non e' nemmeno leggibile.
-      const { personaUnix, comeLaPersona, nellaSuaArea } = await import('../lib/persona-unix')
+      const { personaUnix, comeLaPersona, nellaSuaArea, configPerPersona } = await import('../lib/persona-unix')
       let persona = null
       try {
         persona = await personaUnix(DATA_DIR(), requester)
@@ -618,7 +618,8 @@ export function systemRouter(): Router {
           return
         }
         if (accountId !== 'default') {
-          claudeCmd = `CLAUDE_CONFIG_DIR='${configDir}' claude`
+          // La config e' la SUA, non quella condivisa: vedi configPerPersona.
+          claudeCmd = `CLAUDE_CONFIG_DIR='${configPerPersona(persona, configDir)}' claude`
           accountLabel = accountId
         }
       }
