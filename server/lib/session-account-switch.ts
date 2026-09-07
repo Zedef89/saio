@@ -80,11 +80,62 @@ async function processCwd(pid: number): Promise<string | null> {
 }
 
 /**
- * La conversazione in corso: fra i transcript del progetto, il piu' recente fra quelli toccati
- * dopo l'avvio di QUESTO processo claude. Il filtro sullo start time e' cio' che evita di
- * rubare la chat a un'altra sessione aperta sullo stesso repo.
+ * Righe "riconoscibili" di un testo: abbastanza lunghe da non capitare per caso.
+ *
+ * Servono a legare una videata a un transcript. Si scartano quelle corte e quelle fatte solo
+ * di cornici del TUI, che sono identiche in ogni sessione e farebbero combaciare tutto.
  */
-async function findTranscript(configDir: string, cwd: string, startedMs: number | null): Promise<string | null> {
+function ancore(testo: string): string[] {
+  return testo
+    .split('\n')
+    .map((l) => l.replace(/[│┃|╭╰─━┈>·•\s]+/g, ' ').trim())
+    .filter((l) => l.length >= 28 && /[a-zA-Z]{4}/.test(l))
+    .slice(-40)
+}
+
+/** Il testo dei messaggi dentro un transcript, per confrontarlo con la videata. */
+async function testoDelTranscript(file: string): Promise<string> {
+  const raw = await fs.readFile(file, 'utf8').catch(() => '')
+  const righe = raw.split('\n').slice(-400)
+  const pezzi: string[] = []
+  for (const r of righe) {
+    if (!r.trim()) continue
+    try {
+      const o = JSON.parse(r) as { message?: { content?: unknown } }
+      const c = o.message?.content
+      if (typeof c === 'string') pezzi.push(c)
+      else if (Array.isArray(c)) {
+        for (const b of c as { type?: string; text?: string }[]) if (b?.type === 'text' && b.text) pezzi.push(b.text)
+      }
+    } catch {
+      /* riga non JSON: si salta */
+    }
+  }
+  return pezzi.join('\n')
+}
+
+/**
+ * La conversazione in corso in QUESTA pane.
+ *
+ * Il criterio "il piu' recente toccato dopo l'avvio del processo" non basta, ed e' il bug che
+ * il 07/09 ha spostato la chat di una persona dentro la sessione di un'altra: su questa
+ * macchina piu' sessioni lavorano sullo stesso repo con lo stesso account — misurate quattro
+ * insieme su komanda-dashboard — e quindi condividono la stessa cartella di transcript. Fra
+ * due chat entrambe vive, "la piu' recente" e' quella di chi ha scritto per ultimo, che non
+ * ha niente a che vedere con chi sta cambiando account. E il transcript viene SPOSTATO: chi
+ * lo perde se ne accorge quando la sua chat non c'e' piu'.
+ *
+ * Quindi, quando i candidati sono piu' d'uno, si guarda cosa c'e' scritto a schermo: la
+ * videata della pane appartiene per definizione a questa sessione. Vince il transcript che la
+ * contiene. **Se nessuno la contiene, o se pareggiano, non si sceglie**: meglio ripartire
+ * senza cronologia che portare via la chat a qualcun altro.
+ */
+export async function findTranscript(
+  configDir: string,
+  cwd: string,
+  startedMs: number | null,
+  videata?: string,
+): Promise<string | null> {
   const dir = path.join(configDir, 'projects', transcriptSlug(cwd))
   try {
     const entries = await fs.readdir(dir)
@@ -98,9 +149,42 @@ async function findTranscript(configDir: string, cwd: string, startedMs: number 
       candidates.push({ file: name, mtime: st.mtimeMs })
     }
     candidates.sort((a, b) => b.mtime - a.mtime)
-    return candidates.length ? candidates[0].file.replace(/\.jsonl$/, '') : null
+    if (candidates.length === 0) return null
+    if (candidates.length === 1) return candidates[0].file.replace(/\.jsonl$/, '')
+
+    const chiavi = ancore(videata || '')
+    if (chiavi.length === 0) {
+      logger.warn(`[switch-account] ${candidates.length} chat aperte su ${cwd} e videata illeggibile: riparte senza cronologia invece di indovinare`)
+      return null
+    }
+    const punteggi: { file: string; punti: number }[] = []
+    for (const c of candidates.slice(0, 8)) {
+      const testo = await testoDelTranscript(path.join(dir, c.file))
+      punteggi.push({ file: c.file, punti: chiavi.filter((k) => testo.includes(k)).length })
+    }
+    punteggi.sort((a, b) => b.punti - a.punti)
+    if (punteggi[0].punti === 0 || punteggi[0].punti === punteggi[1]?.punti) {
+      logger.warn(`[switch-account] ${candidates.length} chat aperte su ${cwd} e nessuna riconosciuta dalla videata: riparte senza cronologia invece di prendere quella di un altro`)
+      return null
+    }
+    return punteggi[0].file.replace(/\.jsonl$/, '')
   } catch {
     return null
+  }
+}
+
+/** Quello che si vede adesso nella pane: e' la conversazione di QUESTA sessione, per definizione. */
+async function readPaneText(session: string): Promise<string> {
+  try {
+    const { tmuxSuSessione } = await import('./tmux-cmd')
+    const dd = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+    const { stdout } = await tmuxSuSessione(dd, session, ['capture-pane', '-p', '-S', '-400', '-t', `=${session}:`], {
+      timeout: 4000,
+      maxBuffer: 2_000_000,
+    })
+    return stdout
+  } catch {
+    return ''
   }
 }
 
@@ -219,7 +303,10 @@ export async function switchSessionAccount(
 
   const cwd = (await processCwd(claudePid)) || ''
   const startedMs = await processStartMs(claudePid)
-  const transcript = cwd ? await findTranscript(srcDir, cwd, startedMs) : null
+  // La videata della pane e' l'unica cosa che appartiene con certezza a QUESTA sessione:
+  // serve a riconoscere la sua chat fra quelle aperte sullo stesso repo.
+  const videata = await readPaneText(session)
+  const transcript = cwd ? await findTranscript(srcDir, cwd, startedMs, videata) : null
 
   if (!(await stopClaude(session, claudePid))) {
     return { ok: false, code: 'stop_failed', message: 'Claude non si e\' fermato: chiudilo a mano nella pane e riprova' }
