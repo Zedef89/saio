@@ -116,6 +116,12 @@ export async function personaUnix(dataDir: string, email: string | null | undefi
  * un collegamento al SOLO file delle credenziali: usa l'abbonamento, non legge il lavoro
  * degli altri, e i suoi transcript restano suoi.
  *
+ * Va nella sua HOME, non nell'area di lavoro: e' li' che la cercano sia `claude` nudo sia i
+ * wrapper `claude-b`/`-c`/… (`export CLAUDE_CONFIG_DIR="$HOME/.claude-b"`). Tenerla altrove
+ * significa che meta' dei modi di lanciare la CLI trova una cartella vuota e chiede il login.
+ * E l'area di lavoro non deve contenere cartelle `.claude*`: lavorandoci dentro, la CLI le
+ * scambia per la configurazione DI PROGETTO.
+ *
  * Se il percorso non e' quello di un account condiviso, torna com'e'.
  */
 export function configPerPersona(p: PersonaUnix | null, configDir: string): string {
@@ -129,7 +135,7 @@ export function configPerPersona(p: PersonaUnix | null, configDir: string): stri
   const base = ACCOUNT_ROOT + path.sep
   if (!vero.startsWith(base)) return configDir
   const nome = vero.slice(base.length).split(path.sep)[0]
-  return path.join(p.area, nome)
+  return path.join(p.home, nome)
 }
 
 export function envPerPersona(base: NodeJS.ProcessEnv, p: PersonaUnix): NodeJS.ProcessEnv {
@@ -246,6 +252,25 @@ export async function riapriCredenziali(configDirCondivisa: string): Promise<voi
   } catch {
     /* file assente o non siamo root: la sessione lo dira' da se' */
   }
+}
+
+/**
+ * Riapre le credenziali di TUTTI gli account condivisi.
+ *
+ * Riaprire solo quello che si crede di star lanciando non basta, per due motivi: dal ramo
+ * delle card la CLI parte nuda e l'account lo sceglie da se' (`$HOME/.claude`), e dal
+ * terminale la persona puo' scrivere `claude-b` quando vuole. Misurato: tre file su cinque
+ * erano gia' richiusi a `600` poche ore dopo averli aperti. Sono cinque `chmod`, costano
+ * niente, e tolgono di mezzo l'intera classe di problemi invece di indovinare.
+ */
+export async function riapriTutteLeCredenziali(): Promise<void> {
+  let nomi: string[] = []
+  try {
+    nomi = (await fsp.readdir(ACCOUNT_ROOT)).filter((n) => /^\.claude(-[a-zA-Z0-9_-]+)?$/.test(n))
+  } catch {
+    return
+  }
+  await Promise.all(nomi.map((n) => riapriCredenziali(path.join(ACCOUNT_ROOT, n))))
 }
 
 let gidCache: number | null | undefined

@@ -959,10 +959,8 @@ class PtyManager {
     if (__persona) {
       // La CLI richiude il file delle credenziali a ogni rinnovo del token: si riapre adesso,
       // che e' il punto da cui passano tutte le sessioni. Vedi riapriCredenziali().
-      const { ACCOUNT_ROOT, riapriCredenziali } = await import('./persona-unix')
-      const suo = spawnEnv.CLAUDE_CONFIG_DIR
-      const nome = suo ? path.basename(suo) : '.claude'
-      await riapriCredenziali(path.join(ACCOUNT_ROOT, nome))
+      const { riapriTutteLeCredenziali } = await import('./persona-unix')
+      await riapriTutteLeCredenziali()
     }
     if (__persona) {
       logger.info(`[pty] ${projectId}: sessione come ${__persona.user} (uid=${__persona.uid}) cwd=${spawnCwd} tmux -L ${__persona.slug}`)
