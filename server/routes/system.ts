@@ -600,7 +600,18 @@ export function systemRouter(): Router {
         const p0 = (project as { path?: string } | null)?.path
         const p = p0 ? nellaSuaArea(persona, p0) : null
         if (!p || !fsSync.existsSync(p)) {
-          res.status(400).json({ error: 'project_dir_missing', path: p || p0 || null })
+          // E' il primo inciampo di chi entra nuova, e il codice da solo non lo dice a
+          // nessuno: la persona c'e', il progetto le e' stato dato, ma nella sua area il
+          // clone non c'e' — quasi sempre perche' la sua chiave non era ancora sul suo
+          // GitHub quando `saio-persona-nuova.sh` ha provato a clonare, e quel passo la',
+          // fallendo, va rifatto a mano. Il messaggio dice dove manca e a chi chiedere.
+          res.status(400).json({
+            error: 'project_dir_missing',
+            path: p || p0 || null,
+            message: persona
+              ? `Questo progetto non e' ancora nella tua area (${p || '—'}): il clone va fatto li'. Chiedilo a chi amministra la devbox.`
+              : `La cartella del progetto non esiste: ${p0 || '—'}`,
+          })
           return
         }
         cwd = p
