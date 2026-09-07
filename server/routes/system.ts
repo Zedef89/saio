@@ -621,14 +621,21 @@ export function systemRouter(): Router {
       // nella riga di comando finisce solo una config dir nostra, mai input dell'utente.
       let claudeCmd = 'claude'
       let accountLabel = 'default'
-      if (startClaude && accountId) {
+      // 🔴 Per chi ha un utente Unix suo, l'account di default NON e' un caso da saltare.
+      // `claude` nudo legge `$HOME/.claude`, e la sua HOME e' `/home/<lei>`: li' non c'e'
+      // niente. La CLI parte dall'inizio e le chiede con quale piano vuole usare Claude —
+      // davanti a un abbonamento gia' pagato, e con il rischio che un login vero riscriva
+      // il `.credentials.json` che tutti e cinque gli account condividono. La config di
+      // default va detta esplicitamente, come le altre.
+      const accountRichiesto = accountId || (persona ? 'default' : null)
+      if (startClaude && accountRichiesto) {
         const { configDirForAccount } = await import('../lib/claude-accounts')
-        const configDir = await configDirForAccount(accountId)
+        const configDir = await configDirForAccount(accountRichiesto)
         if (!configDir) {
-          res.status(400).json({ error: 'unknown_account', account: accountId })
+          res.status(400).json({ error: 'unknown_account', account: accountRichiesto })
           return
         }
-        if (accountId !== 'default') {
+        if (persona || accountRichiesto !== 'default') {
           // La config e' la SUA, non quella condivisa: vedi configPerPersona. E il file delle
           // credenziali va riaperto adesso: la CLI lo richiude a ogni rinnovo del token.
           if (persona) {
@@ -636,7 +643,7 @@ export function systemRouter(): Router {
             await riapriCredenziali(configDir)
           }
           claudeCmd = `CLAUDE_CONFIG_DIR='${configPerPersona(persona, configDir)}' claude`
-          accountLabel = accountId
+          accountLabel = accountRichiesto
         }
       }
 
