@@ -160,6 +160,11 @@ export function envPerPersona(base: NodeJS.ProcessEnv, p: PersonaUnix): NodeJS.P
   out.HOME = p.home
   out.USER = p.user
   out.LOGNAME = p.user
+  // `claude` lanciato senza `CLAUDE_CONFIG_DIR` NON ricade su `$HOME/.claude`: cerca altrove
+  // e risponde «Not logged in», anche con le credenziali al loro posto. Chi passa da un
+  // account esplicito (il ramo account, i wrapper `claude-b`) la imposta gia' e non viene
+  // toccata; questa riga copre il caso nudo, che e' quello delle card progetto.
+  out.CLAUDE_CONFIG_DIR = out.CLAUDE_CONFIG_DIR || path.join(p.home, '.claude')
   out.SHELL = base.SHELL || '/bin/bash'
   out.PATH = base.PATH?.split(':').filter((d) => !d.startsWith('/root/')).join(':') || '/usr/local/bin:/usr/bin:/bin'
   return out
