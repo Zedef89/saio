@@ -188,7 +188,7 @@ function RigaProgetto({ p, persone }: { p: ProgettoVisibilita; persone: Persona[
         <div className="min-w-0">
           <div className="text-sm font-medium">{p.nome}</div>
           <div className="text-xs text-muted-foreground mt-0.5">
-            {tutti ? 'lo vedono tutti' : `solo ${p.persone.join(', ')}`}
+            {tutti ? 'nessun invitato' : p.persone.join(', ')}
           </div>
         </div>
         <div className="flex flex-wrap gap-3 shrink-0 justify-end">
@@ -306,11 +306,11 @@ export default function SettingsPermessiPage() {
           <div className="px-4 py-3">
             <h2 className="text-sm font-semibold">Chi vede quale progetto</h2>
             <p className="text-xs text-muted-foreground mt-1">
-              Un progetto senza nessuno spuntato <strong>lo vedono tutti</strong>: è com'era
-              prima, e restringere è una decisione da prendere, non qualcosa che scatta da
-              sola su {data.progettiVisibilita.length} progetti. Spuntando una persona, il
-              progetto diventa suo e sparisce agli altri invitati — chi amministra continua a
-              vedere tutto. Non si nasconde solo la card: la sessione non si apre nemmeno
+              Chi amministra vede tutti i progetti. Un <strong>invitato</strong> vede solo
+              quelli in cui è spuntato: senza spunte non ne vede nessuno, ed è il default
+              giusto — con {data.progettiVisibilita.length} progetti registrati, «tutto
+              quello che nessuno ha ristretto» vorrebbe dire dare tutto a chi entra il primo
+              giorno. Non si nasconde solo la card: la sessione non si apre nemmeno
               indovinando l'indirizzo.
             </p>
           </div>

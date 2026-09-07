@@ -618,7 +618,12 @@ export function systemRouter(): Router {
           return
         }
         if (accountId !== 'default') {
-          // La config e' la SUA, non quella condivisa: vedi configPerPersona.
+          // La config e' la SUA, non quella condivisa: vedi configPerPersona. E il file delle
+          // credenziali va riaperto adesso: la CLI lo richiude a ogni rinnovo del token.
+          if (persona) {
+            const { riapriCredenziali } = await import('../lib/persona-unix')
+            await riapriCredenziali(configDir)
+          }
           claudeCmd = `CLAUDE_CONFIG_DIR='${configPerPersona(persona, configDir)}' claude`
           accountLabel = accountId
         }

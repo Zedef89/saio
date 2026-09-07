@@ -48,7 +48,11 @@ async function filtraPerPersona(
   const { ownerSlugForEmail } = await import('../lib/session-owner')
   const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
   const slug = await ownerSlugForEmail(dataDir, user.email)
-  return progetti.filter((p) => !p.persone || p.persone.length === 0 || p.persone.includes(slug))
+  // Un invitato vede SOLO i progetti in cui e' scritto. Non «tutti quelli che nessuno ha
+  // ristretto»: quello sembra prudente e non lo e', perche' su duecento progetti gia'
+  // registrati significa dare tutto a chi entra il primo giorno. E' lo stesso default del
+  // banco degli accessi — chi arriva parte senza niente, e le cose gliele si danno.
+  return progetti.filter((p) => p.persone?.includes(slug))
 }
 
 // Check if a PID is still alive (for task liveness detection)

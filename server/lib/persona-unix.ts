@@ -223,3 +223,40 @@ export function nellaSuaArea(p: PersonaUnix | null, percorso: string): string | 
   const suo = path.join(p.devRoot, rel)
   return suo.startsWith(p.devRoot + path.sep) ? suo : null
 }
+
+/**
+ * Riapre il file delle credenziali di un account condiviso.
+ *
+ * La CLI riscrive `.credentials.json` a ogni rinnovo del token e lo rimette a `600`: la
+ * persona che ci era stata autorizzata smette di leggerlo, e la sessione dopo non parte piu'.
+ * Non serve a niente metterlo a posto una volta — va rimesso ogni volta che una sessione sta
+ * per usarlo, cioe' qui, che e' il punto da cui passano tutte.
+ *
+ * Nemmeno una ACL reggerebbe: un `chmod 600` esplicito azzera la mask e la spegne.
+ *
+ * Il gruppo e' `taskless`, cioe' le persone della devbox: gli abbonamenti sono in comune per
+ * decisione presa: se un domani non lo fossero piu', e' questa riga che va cambiata.
+ */
+export async function riapriCredenziali(configDirCondivisa: string): Promise<void> {
+  const file = path.join(configDirCondivisa, '.credentials.json')
+  try {
+    const { gid } = await gruppoTaskless()
+    await fsp.chmod(file, 0o640)
+    if (gid !== null) await fsp.chown(file, 0, gid)
+  } catch {
+    /* file assente o non siamo root: la sessione lo dira' da se' */
+  }
+}
+
+let gidCache: number | null | undefined
+async function gruppoTaskless(): Promise<{ gid: number | null }> {
+  if (gidCache !== undefined) return { gid: gidCache }
+  try {
+    const txt = await fsp.readFile('/etc/group', 'utf8')
+    const riga = txt.split('\n').find((l) => l.startsWith('taskless:'))
+    gidCache = riga ? Number(riga.split(':')[2]) : null
+  } catch {
+    gidCache = null
+  }
+  return { gid: gidCache }
+}

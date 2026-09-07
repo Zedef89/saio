@@ -184,8 +184,10 @@ async function puoVedereProgetto(projectId: string, email: string | null | undef
     ])
     const p = await projectsStore.findById(projectId)
     if (!p) return false
+    // Nessuno elencato = nessun invitato dentro. Vedi filtraPerPersona in routes/projects.ts:
+    // il default per chi entra e' «niente», non «tutto quello che nessuno ha ristretto».
     const persone = (p as { persone?: string[] }).persone
-    if (!persone || persone.length === 0) return true
+    if (!persone || persone.length === 0) return false
     const dataDir = process.env.DASHBOARD_DATA_DIR || pathJoinData()
     return persone.includes(await ownerSlugForEmail(dataDir, email))
   } catch {
