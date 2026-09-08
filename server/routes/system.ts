@@ -543,16 +543,42 @@ export function systemRouter(): Router {
   })
 
   // Crea una nuova sessione tmux dalla pagina Sessioni (senza passare dalla card progetto).
-  // body: { name, projectId?, startClaude?, account? }
+  // body: { name, projectId?, startClaude?, account?, prompt?, maxSessioni? }
   //  - projectId → cwd = path del progetto (e il nome di default è quello del progetto)
   //  - senza projectId → sessione "libera" nella home
   //  - account → quale abbonamento Claude usare (vedi /claude-accounts); omesso = quello di default
+  //  - prompt → il lavoro da fare, incollato nella CLI appena è pronta. Per chi apre sessioni
+  //    senza nessuno davanti (un timer che vede arrivare una revisione nuova): il nome fa da
+  //    chiave, quindi la stessa sessione non nasce due volte e il secondo lavoro si aggiunge
+  //    a quella già aperta invece di aprirne un'altra.
+  //  - maxSessioni → tetto alle sessioni tmux vive. Vale solo per le aperture automatiche
+  //    (`prompt` presente o tetto esplicito): la pagina Sessioni resta com'era.
+  //  - contaSolo → prefisso su cui applicare il tetto (`alberto-rev-`): chi apre in automatico
+  //    limita le proprie sessioni, non quelle di chi sta lavorando a mano.
   // Stessa whitelist del kill: il nome finisce in una riga di comando, niente caratteri strani.
   router.post('/tmux-sessions', async (req, res) => {
     const rawName = String(req.body?.name || '').trim()
     const projectId = req.body?.projectId ? String(req.body.projectId) : null
     const startClaude = req.body?.startClaude !== false
     const accountId = req.body?.account ? String(req.body.account) : null
+    const prompt = req.body?.prompt ? String(req.body.prompt) : null
+    const contaSolo = req.body?.contaSolo ? String(req.body.contaSolo) : null
+    const maxSessioni = req.body?.maxSessioni != null
+      ? Number(req.body.maxSessioni)
+      : prompt
+        ? Number(process.env.SAIO_MAX_SESSIONI || 21)
+        : null
+
+    // Il prompt viaggia in una riga di comando e in un file temporaneo: un testo enorme
+    // non e' un prompt, e' un incidente.
+    if (prompt && prompt.length > 20_000) {
+      res.status(400).json({ error: 'prompt_troppo_lungo', lunghezza: prompt.length, max: 20_000 })
+      return
+    }
+    if (maxSessioni != null && (!Number.isFinite(maxSessioni) || maxSessioni < 1)) {
+      res.status(400).json({ error: 'max_sessioni_non_valido' })
+      return
+    }
 
     if (!/^[a-zA-Z0-9._-]+$/.test(rawName)) {
       res.status(400).json({ error: 'invalid_session_name' })
@@ -572,13 +598,55 @@ export function systemRouter(): Router {
       const execFileAsync = promisify(execFile)
 
       // Già viva? Non ricreare: il frontend ci si attacca e basta.
+      let esisteGia = false
       try {
         const { tmuxSuSessione } = await import('../lib/tmux-cmd')
         await tmuxSuSessione(DATA_DIR(), name, ['has-session', '-t', `=${name}`])
-        res.json({ ok: true, name, created: false, alreadyExisted: true })
-        return
+        esisteGia = true
       } catch {
         /* non esiste → si crea */
+      }
+
+      if (esisteGia) {
+        // Senza prompt la risposta è quella di sempre: il frontend si attacca e basta.
+        if (!prompt) {
+          res.json({ ok: true, name, created: false, alreadyExisted: true })
+          return
+        }
+        // Con un prompt: il lavoro nuovo si aggiunge alla sessione che c'è già, invece di
+        // aprirne una seconda sullo stesso ristorante. Ma solo se in quel momento è ferma:
+        // se sta lavorando, il testo diventerebbe la risposta a una domanda a schermo.
+        // Non si aspetta col fiato sospeso (`attendi: false`): chi chiama è un timer.
+        const { inviaPrompt } = await import('../lib/prompt-in-sessione')
+        const esito = await inviaPrompt(DATA_DIR(), name, prompt, { attendi: false })
+        auditAction(req, 'tmux.prompt', { name, esito: esito.ok ? 'inviato' : esito.motivo })
+        res.json({
+          ok: true,
+          name,
+          created: false,
+          alreadyExisted: true,
+          promptInviato: esito.ok,
+          motivo: esito.ok ? null : esito.motivo,
+        })
+        return
+      }
+
+      // Il tetto. `contaSolo` dice cosa si conta: senza, si contano TUTTE le sessioni vive
+      // della macchina — e su questa devbox sono già 21 di lavoro normale, quindi un tetto
+      // globale nascerebbe saturo e non aprirebbe mai niente. Chi apre in automatico passa
+      // il proprio prefisso (`alberto-rev-`) e limita sé stesso, non il lavoro degli altri.
+      // Sopra il tetto non si crea e non si accoda niente qui: chi chiama ripassa, ed è
+      // l'unico che sa quale round è più urgente.
+      if (maxSessioni != null) {
+        const { tmuxOvunque } = await import('../lib/tmux-cmd')
+        const righe = await tmuxOvunque(DATA_DIR(), ['list-sessions', '-F', '#{session_name}'])
+        const vive = righe.split('\n').filter(Boolean)
+        const aperte = contaSolo ? vive.filter((s) => s.startsWith(contaSolo)).length : vive.length
+        if (aperte >= maxSessioni) {
+          logger.warn(`[tmux] "${name}": non creata, ${aperte}/${maxSessioni} sessioni già aperte`)
+          res.status(429).json({ error: 'limite_sessioni', aperte, max: maxSessioni })
+          return
+        }
       }
 
       // Chi ha un utente Unix suo apre la sessione COME quell'utente, e dentro la SUA area:
@@ -669,12 +737,37 @@ export function systemRouter(): Router {
         logger.info(`[tmux] "${name}": claude con perm=${resolvePermissionMode()}`)
       }
 
+      // Il prompt si incolla quando la CLI è sveglia e ferma: appena creata la pane è ancora
+      // una shell, e il testo scritto lì si perde. `attendiPronta` guarda la videata invece
+      // di tirare a indovinare con un `sleep`.
+      let promptInviato: boolean | null = null
+      let promptMotivo: string | null = null
+      if (prompt) {
+        if (!startClaude) {
+          promptInviato = false
+          promptMotivo = 'non_pronta'
+        } else {
+          const { inviaPrompt } = await import('../lib/prompt-in-sessione')
+          const esito = await inviaPrompt(DATA_DIR(), name, prompt)
+          promptInviato = esito.ok
+          promptMotivo = esito.ok ? null : esito.motivo
+        }
+      }
+
       logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ` (+claude account=${accountLabel})` : ''}`)
       // Una sessione = un terminale su questa macchina, root per chi non ha un utente suo:
       // e' l'azione piu' pesante che l'interfaccia permette, e va nell'audit anche quando va
       // tutto bene. `utente` dice con quale identita' e' partita davvero.
-      auditAction(req, 'tmux.created', { name, cwd, projectId, utente: persona?.user || 'root', account: startClaude ? accountLabel : null })
-      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null })
+      auditAction(req, 'tmux.created', { name, cwd, projectId, utente: persona?.user || 'root', account: startClaude ? accountLabel : null, conPrompt: !!prompt })
+      res.json({
+        ok: true,
+        name,
+        cwd,
+        created: true,
+        startedClaude: startClaude,
+        account: startClaude ? accountLabel : null,
+        ...(prompt ? { promptInviato, motivo: promptMotivo } : {}),
+      })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })
     }

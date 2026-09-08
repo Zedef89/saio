@@ -33,6 +33,9 @@ export type AuditEventType =
   | 'vault.written'
   | 'pty.opened'
   | 'tmux.created'
+  // Un prompt scritto dentro una sessione che stava gia' girando: e' l'unico modo per
+  // sapere, dopo, che quel lavoro non l'ha chiesto la persona ma un timer.
+  | 'tmux.prompt'
   | 'tmux.killed'
   | 'tmux.account.switched'
   // Il cancello: chi cambia una regola dei permessi, e chi decide una richiesta. Senza
