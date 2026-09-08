@@ -629,7 +629,8 @@ class PtyManager {
     opts: SpawnOptions
   ): Promise<{ dir: string; session: string } | null> {
     try {
-      const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles } = await import('./worktree')
+      const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles, applyIdentity } =
+        await import('./worktree')
       if (!(await isGitRepo(repoDir))) {
         logger.info(`[pty] ${projectName}: non è un repo git → worktree isolato saltato`)
         return null
@@ -638,15 +639,26 @@ class PtyManager {
       const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
       const identity = await getIdentity(dataDir, opts.userEmail!)
 
-      // Worktree scelto esplicitamente dalla UI fra quelli esistenti.
+      // Worktree scelto esplicitamente dalla UI fra quelli esistenti. L'identità va
+      // RIAPPLICATA: quel worktree può averne già una — di chi l'ha usato prima — e senza
+      // questa riga i commit di questa sessione uscirebbero a nome suo.
       if (opts.worktreePath && fs.existsSync(opts.worktreePath)) {
+        const w: string[] = []
+        await applyIdentity(opts.worktreePath, identity, w)
+        for (const m of w) logger.warn(`[pty] ${projectName}: ${m}`)
         await this.warnOverlaps(overlappingFiles, repoDir, opts.worktreePath, projectName)
         return { dir: opts.worktreePath, session: sessionNameFor(identity.slug, projectName) }
       }
 
       const wt = await ensureWorktree(repoDir, identity, { label: opts.worktreeLabel })
       if ('error' in wt) {
-        logger.warn(`[pty] ${projectName}: worktree non creato (${wt.error}) → uso la working copy`)
+        // Si ripiega sul checkout condiviso — ma prima gli si mette addosso l'identità di
+        // chi apre la sessione. Senza, resta quella dell'ultimo che ci ha lavorato: è il
+        // caso in cui i commit escono firmati da un collega senza che nessuno se ne accorga.
+        const w: string[] = []
+        await applyIdentity(repoDir, identity, w)
+        for (const m of w) logger.warn(`[pty] ${projectName}: ${m}`)
+        logger.warn(`[pty] ${projectName}: worktree non creato (${wt.error}) → uso la working copy come ${identity.slug}`)
         return null
       }
       for (const w of wt.warnings) logger.warn(`[pty] ${projectName}: ${w}`)

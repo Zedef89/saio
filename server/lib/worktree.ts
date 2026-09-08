@@ -303,8 +303,16 @@ export async function ensureWorktree(
 /**
  * Identità git isolata nel worktree. Richiede `extensions.worktreeConfig` sul repo padre:
  * senza, `--worktree` fallisce e la config finirebbe condivisa fra tutti gli utenti.
+ *
+ * ⚠️ Va chiamata su OGNI cartella da cui si aprirà una sessione, non solo su quelle che
+ * creiamo noi. `extensions.worktreeConfig` è un'impostazione del repo: appena la accendiamo
+ * per un worktree, anche il **checkout principale** smette di leggere `[user]` da
+ * `.git/config` e legge `.git/config.worktree`. Se lì dentro resta l'identità di chi ha
+ * lavorato per ultimo, ce la trova chiunque apra una sessione lì — e i suoi commit escono a
+ * nome di un altro, in silenzio. Successo davvero: dal 05/09/2026 al 08/09/2026 il checkout
+ * condiviso di komanda-dashboard era firmato Alberto, e tre commit sono usciti a suo nome.
  */
-async function applyIdentity(wtPath: string, identity: GitIdentity, warnings: string[]): Promise<void> {
+export async function applyIdentity(wtPath: string, identity: GitIdentity, warnings: string[]): Promise<void> {
   try {
     await git(wtPath, ['config', 'extensions.worktreeConfig', 'true'])
     await git(wtPath, ['config', '--worktree', 'user.name', identity.name])
