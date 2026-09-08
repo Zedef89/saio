@@ -727,7 +727,12 @@ export function systemRouter(): Router {
         await writeIdentityFile(DATA_DIR(), requester, persona ? path.join(persona.area, '.saio') : undefined),
       )
 
-      const nuova = comeLaPersona(persona, [TMUX_BIN, 'new-session', '-d', '-s', name, '-c', cwd])
+      // Larga di suo (`-x`/`-y`): una sessione che nasce senza nessuno attaccato eredita la
+      // dimensione di chi l'ha creata, e a pane stretta la CLI TRONCA la barra di stato
+      // (`esc to interrupt` → `esc …`). Chi legge quella barra per sapere se sta lavorando —
+      // le card, e chi deve decidere se puo' scriverle dentro — la darebbe per ferma. Quando
+      // qualcuno si attacca, tmux ridimensiona al suo terminale: non si perde niente.
+      const nuova = comeLaPersona(persona, [TMUX_BIN, 'new-session', '-d', '-s', name, '-c', cwd, '-x', '200', '-y', '50'])
       await execFileAsync(nuova.file, nuova.args)
       if (startClaude) {
         const invio = comeLaPersona(persona, [TMUX_BIN, 'send-keys', '-t', name, claudeCmd, 'Enter'])

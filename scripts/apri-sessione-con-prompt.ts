@@ -29,7 +29,9 @@ const EMAIL = email || null
   cmd = withPermissionMode(cmd)
   cmd = withIdentityFile(cmd, await writeIdentityFile(DATA, EMAIL || undefined))
 
-  await exec(TMUX_BIN, ['new-session', '-d', '-s', nome, '-c', cwd])
+  // `-x`/`-y`: senza nessuno attaccato la pane resta stretta e la CLI tronca la barra di
+  // stato, che e' il modo in cui si capisce se sta lavorando. Vedi routes/system.ts.
+  await exec(TMUX_BIN, ['new-session', '-d', '-s', nome, '-c', cwd, '-x', '200', '-y', '50'])
   await exec(TMUX_BIN, ['send-keys', '-t', nome, cmd, 'Enter'])
   console.log(`sessione ${nome} creata in ${cwd} (account ${account})`)
 

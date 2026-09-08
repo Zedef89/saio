@@ -26,6 +26,30 @@ export type EsitoPrompt =
   | { ok: false; motivo: 'occupata' | 'non_pronta' | 'errore'; dettaglio?: string }
 
 /**
+ * 🔴 La seconda prova che la sessione sta lavorando, e serve davvero.
+ *
+ * `readActivity` riconosce «sta elaborando» dalla barra di stato, che a pane stretta la CLI
+ * **tronca**: `esc to interrupt` diventa `esc …`, la regex non aggancia piu' niente e una
+ * sessione in pieno lavoro viene data per `idle`. Non e' un caso di laboratorio: una sessione
+ * aperta da un timer non ha nessun client attaccato, resta larga quanto il terminale che l'ha
+ * creata, ed e' esattamente il caso in cui qualcuno le scriverebbe dentro.
+ *
+ * Restano due firme corte, che la larghezza non porta via: il conto dei secondi accanto allo
+ * spinner (`(21s ·`), e — anche quando la CLI e' scrollata e lo spinner non e' in videata —
+ * il `· esc` della barra, che compare SOLO mentre c'e' qualcosa da interrompere.
+ */
+const STA_LAVORANDO_RE = /\(\d+s\s*·|[✻✽✢∗⋆]\s*\S+…|·\s*esc\b/
+
+async function videataDiceLavoro(dataDir: string, name: string): Promise<boolean> {
+  try {
+    const { stdout } = await tmuxSuSessione(dataDir, name, ['capture-pane', '-p', '-t', `=${name}:`], { timeout: 4000 })
+    return STA_LAVORANDO_RE.test(stdout)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Aspetta che la CLI sia sveglia e ferma al prompt.
  *
  * Subito dopo `new-session` la pane e' una shell (`shell`) e per qualche secondo la CLI sta
@@ -40,7 +64,7 @@ export async function attendiPronta(
   const fine = Date.now() + msMax
   for (;;) {
     const stato = await readActivity(name, dataDir)
-    if (stato === 'idle') return 'idle'
+    if (stato === 'idle') return (await videataDiceLavoro(dataDir, name)) ? 'occupata' : 'idle'
     // Sta gia' lavorando: e' pronta, ma non e' il momento di scriverle.
     if (stato === 'working' || stato === 'waiting') return 'occupata'
     if (Date.now() >= fine) return 'non_pronta'
@@ -61,9 +85,13 @@ export async function inviaPrompt(
   testo: string,
   opts: { attendi?: boolean; msMax?: number } = {},
 ): Promise<EsitoPrompt> {
-  const stato = opts.attendi === false
-    ? await readActivity(name, dataDir)
-    : await attendiPronta(dataDir, name, opts.msMax)
+  let stato: string
+  if (opts.attendi === false) {
+    stato = await readActivity(name, dataDir)
+    if (stato === 'idle' && (await videataDiceLavoro(dataDir, name))) stato = 'occupata'
+  } else {
+    stato = await attendiPronta(dataDir, name, opts.msMax)
+  }
 
   if (stato === 'occupata' || stato === 'working' || stato === 'waiting') {
     return { ok: false, motivo: 'occupata' }
