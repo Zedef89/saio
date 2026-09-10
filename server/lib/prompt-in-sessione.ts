@@ -23,7 +23,7 @@ import { logger } from './logger'
 
 export type EsitoPrompt =
   | { ok: true }
-  | { ok: false; motivo: 'occupata' | 'non_pronta' | 'errore'; dettaglio?: string }
+  | { ok: false; motivo: 'occupata' | 'non_pronta' | 'errore' | 'account_esaurito'; dettaglio?: string }
 
 /**
  * 🔴 La seconda prova che la sessione sta lavorando, e serve davvero.
@@ -83,7 +83,7 @@ export async function inviaPrompt(
   dataDir: string,
   name: string,
   testo: string,
-  opts: { attendi?: boolean; msMax?: number } = {},
+  opts: { attendi?: boolean; msMax?: number; cambiaAccount?: boolean } = {},
 ): Promise<EsitoPrompt> {
   let stato: string
   if (opts.attendi === false) {
@@ -110,6 +110,24 @@ export async function inviaPrompt(
     await new Promise((r) => setTimeout(r, 300))
     await tmuxSuSessione(dataDir, name, ['send-keys', '-t', `=${name}:`, 'Enter'])
     logger.info(`[prompt] "${name}": prompt di ${testo.length} caratteri consegnato`)
+
+    // Consegnato non vuol dire raccolto: se l'abbonamento ha finito i token, la CLI risponde
+    // «You've hit your session limit» e resta ferma. Da fuori e' identica a una che lavora,
+    // e il prompt e' perso senza che nessuno se ne accorga. Si guarda, si cambia
+    // abbonamento (la conversazione viene dietro) e si riconsegna.
+    if (opts.cambiaAccount !== false) {
+      await new Promise((r) => setTimeout(r, 6000))
+      const { cambiaSeEsaurito } = await import('./account-esaurito')
+      const cambio = await cambiaSeEsaurito(dataDir, name)
+      if (cambio.cambiato) {
+        const stato2 = await attendiPronta(dataDir, name, 90_000)
+        if (stato2 !== 'idle') return { ok: false, motivo: 'non_pronta' }
+        // Il prompt si riconsegna una volta sola: se anche il ricambio e' finito, chi ha
+        // chiamato lo sapra' dal `motivo`, invece di girare fra gli abbonamenti a vuoto.
+        return await inviaPrompt(dataDir, name, testo, { ...opts, cambiaAccount: false })
+      }
+      if (cambio.motivo === 'nessun_ricambio') return { ok: false, motivo: 'account_esaurito' }
+    }
     return { ok: true }
   } catch (err) {
     return { ok: false, motivo: 'errore', dettaglio: (err as Error).message }
