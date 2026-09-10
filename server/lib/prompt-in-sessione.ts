@@ -23,7 +23,7 @@ import { logger } from './logger'
 
 export type EsitoPrompt =
   | { ok: true }
-  | { ok: false; motivo: 'occupata' | 'non_pronta' | 'errore' | 'account_esaurito'; dettaglio?: string }
+  | { ok: false; motivo: 'occupata' | 'non_pronta' | 'errore' | 'account_esaurito' | 'riga_occupata'; dettaglio?: string }
 
 /**
  * 🔴 La seconda prova che la sessione sta lavorando, e serve davvero.
@@ -39,6 +39,29 @@ export type EsitoPrompt =
  * il `· esc` della barra, che compare SOLO mentre c'e' qualcosa da interrompere.
  */
 const STA_LAVORANDO_RE = /\(\d+s\s*·|[✻✽✢∗⋆]\s*\S+…|·\s*esc\b/
+
+/**
+ * 🔴 C'e' gia' del testo scritto nella riga, che nessuno ha ancora inviato?
+ *
+ * Succede tutte le volte che una persona apre la chat e comincia a scrivere: la sessione e'
+ * ferma, `readActivity` dice `idle`, ed e' vero — ma incollarci dentro un prompt attacca il
+ * proprio testo in coda al suo, e quello che parte e' un miscuglio che nessuno dei due ha
+ * scritto. La riga di input della CLI comincia con `❯`: se dopo c'e' qualcosa, la sessione
+ * non e' libera, e' occupata da una persona.
+ */
+async function rigaOccupata(dataDir: string, name: string): Promise<boolean> {
+  try {
+    const { stdout } = await tmuxSuSessione(dataDir, name, ['capture-pane', '-p', '-t', `=${name}:`], { timeout: 4000 })
+    for (const riga of stdout.split('\n')) {
+      const m = /^\s*[❯>]\s?(.*)$/.exec(riga)
+      // La riga del prompt vuota mostra solo il segno; se c'e' altro, e' roba di qualcuno.
+      if (m && m[1].trim()) return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
 
 async function videataDiceLavoro(dataDir: string, name: string): Promise<boolean> {
   try {
@@ -97,6 +120,8 @@ export async function inviaPrompt(
     return { ok: false, motivo: 'occupata' }
   }
   if (stato !== 'idle') return { ok: false, motivo: 'non_pronta' }
+  // Ferma, ma con una frase gia' battuta e non spedita: e' di una persona, non si scrive sopra.
+  if (await rigaOccupata(dataDir, name)) return { ok: false, motivo: 'riga_occupata' }
 
   const file = path.join(os.tmpdir(), `saio-prompt-${process.pid}-${Date.now()}.txt`)
   try {
