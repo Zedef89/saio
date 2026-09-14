@@ -93,9 +93,10 @@ function looksLikeChoiceMenu(screen: string): boolean {
 /**
  * Riconosce la UI di Claude ferma al prompt. La barra di stato cambia forma a seconda di
  * cosa e' attivo ("shift+tab to cycle", "1 shell", "↓ to manage"), quindi si controllano piu'
- * ancore: se nessuna compare, nella pane non c'e' Claude ma una shell.
+ * ancore: se nessuna compare, nella pane non c'e' Claude ma una shell. Con una shell in
+ * background il "(shift+tab to cycle)" sparisce e resta solo "bypass permissions on · 1 shell".
  */
-const CLAUDE_UI_RE = /auto mode on|shift\+tab to cycle|for agents|\/(status|effort)\b/i
+const CLAUDE_UI_RE = /auto mode on|bypass permissions|shift\+tab to cycle|for agents|\/(status|effort)\b/i
 
 /**
  * Claude ha lanciato un workflow e aspetta che finisca: "✻ Waiting for 1 dynamic workflow to
