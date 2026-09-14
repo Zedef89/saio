@@ -20,9 +20,12 @@ interface SessionAccount {
   label: string
   email: string | null
   weeklyPercent: number | null
+  sessionPercent: number | null
   severity: 'normal' | 'warning' | 'critical' | null
-  /** Finestra settimanale finita: aprire la sessione non produrrebbe nulla. */
+  /** Una delle due finestre (5 ore o settimana) è finita: aprire la sessione non produrrebbe nulla. */
   exhausted: boolean
+  /** Quale delle due ha chiuso. */
+  exhaustedWindow?: 'settimana' | '5 ore' | null
   resetsAt: string | null
 }
 
@@ -113,6 +116,7 @@ interface ClaudeAccount {
     weeklyPercent: number
     sessionPercent: number
     weeklyResetsAt: string | null
+    sessionResetsAt?: string | null
     severity: 'normal' | 'warning' | 'critical'
   } | null
   error: string | null
@@ -148,6 +152,42 @@ function resetLabel(iso: string | null): string {
   const time = d.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })
   const isToday = d.toDateString() === new Date().toDateString()
   return isToday ? `reset oggi ${time}` : `reset ${d.toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`
+}
+
+function tonoFinestra(percent: number): string {
+  if (percent >= 95) return 'text-destructive'
+  if (percent >= 75) return 'text-amber-500'
+  return 'text-emerald-500'
+}
+
+/**
+ * Le DUE finestre di un account, non solo la settimanale.
+ *
+ * Sono indipendenti e basta che si riempia una perché la sessione risponda "limit hit": con la
+ * sola settimanale in vista, un account al 27% di settimana e al 98% delle 5 ore risultava
+ * "più libero" e apriva già a limite.
+ */
+function FinestreAccount({ a }: { a: ClaudeAccount }) {
+  if (!a.usage) return <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
+  const weekly = a.usage.weeklyPercent
+  const session = a.usage.sessionPercent
+  const piena = weekly >= 100 ? 'settimana esaurita' : session >= 100 ? '5 ore esaurite' : null
+  // Il reset che serve è quello della finestra più carica: se a bloccare sono le 5 ore, l'ora
+  // della settimanale sposta l'attesa di giorni invece che di minuti.
+  const reset = session > weekly ? (a.usage.sessionResetsAt ?? null) : a.usage.weeklyResetsAt
+  return (
+    <>
+      <span className="text-[11px] font-medium">
+        <span className={tonoFinestra(weekly)}>{weekly}% settimana</span>
+        <span className="text-muted-foreground/50"> · </span>
+        <span className={tonoFinestra(session)}>{session}% 5 ore</span>
+      </span>
+      <span className="block text-[9px] text-muted-foreground/70">
+        {piena ? `${piena} · ` : ''}
+        {a.stale ? `dato di ${a.staleMinutes} min fa` : resetLabel(reset)}
+      </span>
+    </>
+  )
 }
 
 async function createTmuxSession(body: { name: string; projectId: string | null; startClaude: boolean; account: string | null }) {
@@ -514,8 +554,8 @@ export function SessionsPage() {
                               )}
                               title={
                                 exhausted
-                                  ? `${s.account.email || s.account.label}: limite settimanale finito — ${resetLabel(s.account.resetsAt)}`
-                                  : `${s.account.email || s.account.label}${s.account.weeklyPercent != null ? ` — ${s.account.weeklyPercent}% della settimana usato` : ''}`
+                                  ? `${s.account.email || s.account.label}: limite ${s.account.exhaustedWindow ?? 'settimana'} finito — ${resetLabel(s.account.resetsAt)}`
+                                  : `${s.account.email || s.account.label}${s.account.weeklyPercent != null ? ` — ${s.account.weeklyPercent}% della settimana usato, ${s.account.sessionPercent ?? 0}% delle 5 ore` : ''}`
                               }
                             >
                               <UserRound className="w-2.5 h-2.5" />
@@ -773,8 +813,6 @@ export function SessionsPage() {
 
                 {accounts.map((a) => {
                   const picked = pickedAccount === a.id
-                  const weekly = a.usage?.weeklyPercent
-                  const sev = a.usage?.severity ?? 'normal'
                   return (
                     <button
                       key={a.id}
@@ -791,26 +829,7 @@ export function SessionsPage() {
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>
                       )}
                       <span className="ml-auto text-right shrink-0">
-                        {a.usage ? (
-                          <>
-                            <span
-                              className={cn(
-                                'text-[11px] font-medium',
-                                sev === 'critical' && 'text-destructive',
-                                sev === 'warning' && 'text-amber-500',
-                                sev === 'normal' && 'text-emerald-500'
-                              )}
-                            >
-                              {weekly}% settimana
-                            </span>
-                            <span className="block text-[9px] text-muted-foreground/70">
-                              {weekly !== undefined && weekly >= 100 ? 'esaurito · ' : ''}
-                              {a.stale ? `dato di ${a.staleMinutes} min fa` : resetLabel(a.usage.weeklyResetsAt)}
-                            </span>
-                          </>
-                        ) : (
-                          <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
-                        )}
+                        <FinestreAccount a={a} />
                       </span>
                     </button>
                   )
@@ -854,10 +873,10 @@ export function SessionsPage() {
           <div className="space-y-1.5">
             {accountsQuery.isLoading && <p className="text-[10px] text-muted-foreground">Leggo le finestre token…</p>}
             {accounts.map((a) => {
-              const weekly = a.usage?.weeklyPercent
-              const sev = a.usage?.severity ?? 'normal'
               const current = sessions.find((x) => x.name === switchFor)?.account?.id === a.id
-              const full = weekly !== undefined && weekly >= 100
+              // "Pieno" vale per l'una o per l'altra finestra: spostare la sessione su un account
+              // con le 5 ore finite la rimette a limite subito dopo il riavvio.
+              const full = !!a.usage && (a.usage.weeklyPercent >= 100 || a.usage.sessionPercent >= 100)
               return (
                 <button
                   key={a.id}
@@ -877,26 +896,7 @@ export function SessionsPage() {
                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>
                   )}
                   <span className="ml-auto text-right shrink-0">
-                    {a.usage ? (
-                      <>
-                        <span
-                          className={cn(
-                            'text-[11px] font-medium',
-                            sev === 'critical' && 'text-destructive',
-                            sev === 'warning' && 'text-amber-500',
-                            sev === 'normal' && 'text-emerald-500'
-                          )}
-                        >
-                          {weekly}% settimana
-                        </span>
-                        <span className="block text-[9px] text-muted-foreground/70">
-                          {full ? 'esaurito · ' : ''}
-                          {a.stale ? `dato di ${a.staleMinutes} min fa` : resetLabel(a.usage.weeklyResetsAt)}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
-                    )}
+                    <FinestreAccount a={a} />
                   </span>
                 </button>
               )

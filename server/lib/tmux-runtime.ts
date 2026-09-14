@@ -37,9 +37,14 @@ export interface SessionAccountInfo {
   label: string
   email: string | null
   weeklyPercent: number | null
+  /** Finestra di 5 ore: si riempie molto prima della settimanale, ed e' quella che blocca per prima. */
+  sessionPercent: number | null
   severity: 'normal' | 'warning' | 'critical' | null
-  /** Finestra settimanale finita: aprire la sessione non serve a niente finche' non si resetta. */
+  /** Una delle due finestre e' finita: aprire la sessione non serve a niente finche' non si resetta. */
   exhausted: boolean
+  /** Quale finestra ha chiuso, quando `exhausted`: serve a scrivere il motivo giusto. */
+  exhaustedWindow: 'settimana' | '5 ore' | null
+  /** Quando riparte la finestra che blocca (o la settimanale, se non blocca nessuna). */
   resetsAt: string | null
 }
 
@@ -360,16 +365,31 @@ export function slotFromConfigDir(configDir: string | null): string {
 }
 
 function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAccountInfo | null {
-  if (!acc) return { id: slot, label: slot, email: null, weeklyPercent: null, severity: null, exhausted: false, resetsAt: null }
+  if (!acc)
+    return {
+      id: slot, label: slot, email: null, weeklyPercent: null, sessionPercent: null,
+      severity: null, exhausted: false, exhaustedWindow: null, resetsAt: null,
+    }
+  // >=100% e' il caso in cui la sessione risponderebbe solo "You've hit your limit". Vale per
+  // TUTTE e due le finestre: quella delle 5 ore si riempie per prima e blocca allo stesso modo.
+  const settimanaPiena = (acc.usage?.weeklyPercent ?? 0) >= 100
+  const cinqueOrePiene = (acc.usage?.sessionPercent ?? 0) >= 100
   return {
     id: acc.id,
     label: acc.label,
     email: acc.email,
     weeklyPercent: acc.usage?.weeklyPercent ?? null,
+    sessionPercent: acc.usage?.sessionPercent ?? null,
     severity: acc.usage?.severity ?? null,
-    // >=100% e' il caso in cui la sessione risponderebbe solo "You've hit your weekly limit".
-    exhausted: (acc.usage?.weeklyPercent ?? 0) >= 100,
-    resetsAt: acc.usage?.weeklyResetsAt ?? null,
+    exhausted: settimanaPiena || cinqueOrePiene,
+    exhaustedWindow: settimanaPiena ? 'settimana' : cinqueOrePiene ? '5 ore' : null,
+    // L'ora che conta e' quella della finestra che blocca: dire "reset lunedi'" quando a
+    // sbloccare sono le 5 ore fa rimandare il lavoro di tre giorni per niente.
+    resetsAt: (settimanaPiena
+      ? acc.usage?.weeklyResetsAt
+      : cinqueOrePiene
+        ? acc.usage?.sessionResetsAt
+        : acc.usage?.weeklyResetsAt) ?? null,
   }
 }
 

@@ -152,6 +152,9 @@ export interface ClaudeAccountUsage {
   weeklyPercent: number
   sessionPercent: number
   weeklyResetsAt: string | null
+  /** Quando riparte la finestra di 5 ore. `null` quando non ce n'e' una aperta (0%). */
+  sessionResetsAt?: string | null
+  /** La peggiore delle due finestre: e' quella che decide se la sessione parte o no. */
   severity: 'normal' | 'warning' | 'critical'
   /** Tutto il resto della risposta, per la pagina Utilizzo. Opzionale: gli snapshot vecchi non ce l'hanno. */
   detail?: ClaudeUsageDetail | null
@@ -274,6 +277,28 @@ function severityOf(percent: number): ClaudeAccountUsage['severity'] {
   return 'normal'
 }
 
+const ORDINE_SEVERITA = { normal: 0, warning: 1, critical: 2 } as const
+
+function peggiore(
+  a: ClaudeAccountUsage['severity'],
+  b: ClaudeAccountUsage['severity'],
+): ClaudeAccountUsage['severity'] {
+  return ORDINE_SEVERITA[a] >= ORDINE_SEVERITA[b] ? a : b
+}
+
+/**
+ * Quanto e' carico un account, in una cifra sola: la **piu' alta** fra le due finestre.
+ *
+ * Le finestre sono due e indipendenti — 5 ore e 7 giorni — e basta che si riempia UNA perche'
+ * la sessione risponda "limit hit". Guardare solo la settimanale faceva scrivere "piu' libero"
+ * accanto a un account al 27% di settimana e al 98% delle 5 ore: si apriva la sessione e la
+ * prima risposta era il limite.
+ */
+export function caricoDi(usage: ClaudeAccountUsage | null): number {
+  if (!usage) return 101 // chi non risponde non e' candidabile a "piu' libero"
+  return Math.max(usage.weeklyPercent ?? 0, usage.sessionPercent ?? 0)
+}
+
 /** Una finestra della risposta usage; `null` quando il piano non ha quel limite. */
 function finestra(raw: unknown): ClaudeUsageWindow | null {
   const w = raw as Record<string, unknown> | null | undefined
@@ -359,15 +384,22 @@ async function fetchUsage(token: string): Promise<ClaudeAccountUsage> {
     }
     const data = await res.json()
     const weekly = Number(data?.seven_day?.utilization ?? 0)
+    const session = Number(data?.five_hour?.utilization ?? 0)
     // `limits` porta la severità già calcolata lato server: se c'è, vince sulla soglia locale.
-    const weeklyLimit = Array.isArray(data?.limits)
-      ? data.limits.find((l: { kind?: string }) => l?.kind === 'weekly_all')
-      : null
+    const limiti: Array<{ kind?: string; severity?: string }> = Array.isArray(data?.limits) ? data.limits : []
+    const weeklyLimit = limiti.find((l) => l?.kind === 'weekly_all')
+    const sessionLimit = limiti.find((l) => l?.kind === 'session')
     return {
       weeklyPercent: weekly,
-      sessionPercent: Number(data?.five_hour?.utilization ?? 0),
+      sessionPercent: session,
       weeklyResetsAt: data?.seven_day?.resets_at ?? null,
-      severity: (weeklyLimit?.severity as ClaudeAccountUsage['severity']) || severityOf(weekly),
+      sessionResetsAt: data?.five_hour?.resets_at ?? null,
+      // La severita' e' la peggiore delle due finestre: un account fresco di settimana ma con le
+      // 5 ore piene non e' "normal", apre e sbatte sul limite.
+      severity: peggiore(
+        (weeklyLimit?.severity as ClaudeAccountUsage['severity']) || severityOf(weekly),
+        (sessionLimit?.severity as ClaudeAccountUsage['severity']) || severityOf(session),
+      ),
       detail: estraiDettaglio(data),
     }
   } finally {
@@ -457,8 +489,9 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
     }
   }
 
+  // Ordinati sulla finestra piu' piena delle due, non sulla sola settimanale.
   // Chi non risponde finisce in fondo: non è candidabile a "più libero".
-  accounts.sort((a, b) => (a.usage?.weeklyPercent ?? 101) - (b.usage?.weeklyPercent ?? 101))
+  accounts.sort((a, b) => caricoDi(a.usage) - caricoDi(b.usage))
   cache = { at: Date.now(), accounts }
   return accounts
 }

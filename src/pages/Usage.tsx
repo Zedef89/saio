@@ -400,7 +400,11 @@ export function UsagePage() {
   const accounts = data?.accounts ?? []
   const totale7g = accounts.reduce((s, a) => s + (a.tokens?.last7d.output ?? 0), 0)
   const richieste7g = accounts.reduce((s, a) => s + (a.tokens?.last7d.requests ?? 0), 0)
-  const liberi = accounts.filter((a) => (a.usage?.weeklyPercent ?? 100) < 75).length
+  // Libero = sotto il 75% su ENTRAMBE le finestre: con le 5 ore piene l'account non parte,
+  // per quanto vuota sia la settimana.
+  const liberi = accounts.filter(
+    (a) => a.usage != null && a.usage.weeklyPercent < 75 && a.usage.sessionPercent < 75
+  ).length
 
   return (
     <div className="space-y-4 p-4 sm:p-6">
