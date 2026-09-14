@@ -77,7 +77,10 @@ const WORKING_RE = /esc to interrupt/i
 const SPINNER_RE = /^\s*\S\s+[A-Z][\w-]*(?:…|\.\.\.)\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+s\b/
 
 /** Domande esplicite, con o senza menu numerato. */
-const ASK_RE = /do you want to proceed|do you want to|vuoi (che|procedere)|\(y\/n\)|press enter to continue|esc to cancel/i
+const ASK_RE =
+  /do you want to proceed|do you want to|vuoi (che|procedere)|\(y\/n\)|press enter to continue|esc to cancel|decidi tu|dimmi (tu|se|quale|come)|fammi sapere|confermi|posso procedere|procedo\?|serve il tuo ok|mi dai l'ok|autorizzi|resto in attesa|serve una tua decisione|aspetto (il tuo |la tua |un )?(ok|conferma|via libera)/i
+// Le frasi italiane sono quelle di devbox-config/hooks/saio-avvisa.py: la card dice "aspetta te"
+// negli stessi casi in cui l'hook manda il WhatsApp, non in un insieme diverso.
 
 /**
  * Menu di scelta del TUI: opzioni numerate consecutive, corte, con il cursore `❯` su una.
@@ -233,6 +236,8 @@ export interface ScreenState {
   limit: SessionLimit | null
   /** Nella casella c'e' gia' del testo: scriverci sopra lo mescolerebbe con il tuo. */
   inputDirty: boolean
+  /** Le ultime righe sensate a schermo: la domanda da girare su WhatsApp quando aspetta te. */
+  excerpt: string
 }
 
 /** Colori e link (OSC 8) di `capture-pane -e`: per leggere il testo servono via. */
@@ -276,7 +281,14 @@ export function classifyScreen(raw: string, now = Date.now()): ScreenState {
   // Domanda in chiaro senza menu ("vuoi che…?"): conta solo se e' l'ultima cosa a schermo.
   else if (ASK_RE.test(screen.split('\n').filter((l) => l.trim()).slice(-8).join('\n'))) activity = 'waiting'
   else activity = CLAUDE_UI_RE.test(screen) ? 'idle' : 'shell'
-  return { activity, limit, inputDirty }
+  const excerpt = screen
+    .split('\n')
+    .filter((l) => l.trim() && !SEPARATOR_RE.test(l) && !/bypass permissions|shift\+tab|^\s*❯\s*$|\/rc\s*$/i.test(l))
+    .slice(-10)
+    .map((l) => l.trim())
+    .join('\n')
+    .slice(-700)
+  return { activity, limit, inputDirty, excerpt }
 }
 
 export interface ProcRow {
@@ -371,7 +383,7 @@ export async function readScreen(session: string, dataDir = DATA_DIR()): Promise
     const { stdout } = await tmuxSuSessione(dataDir, session, ['capture-pane', '-p', '-e', '-t', `=${session}:`], { timeout: 4000, maxBuffer: 2_000_000 })
     return classifyScreen(stdout)
   } catch {
-    return { activity: 'shell', limit: null, inputDirty: false }
+    return { activity: 'shell', limit: null, inputDirty: false, excerpt: '' }
   }
 }
 

@@ -25,6 +25,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { logger } from './logger'
 import { processTable, findClaudePid, readScreen } from './tmux-runtime'
+import { avvisaSeAspetta } from './waiting-whatsapp'
 
 const INTERVALLO_MS = 60_000
 /** Il reset e' scritto al minuto: un filo dopo, per non trovare il limite ancora chiuso. */
@@ -83,6 +84,8 @@ async function giro(): Promise<void> {
       viste.add(name)
       if (!findClaudePid(rows, Number(pid))) continue
       const s = await readScreen(name, dd)
+      // Stessa videata, secondo uso: se aspetta te da qualche minuto, WhatsApp (vedi waiting-whatsapp.ts).
+      await avvisaSeAspetta(name, s, dd)
       if (!s.limit || s.activity !== 'idle' || s.inputDirty) continue
       const at = Date.parse(s.limit.resetsAt)
       const now = Date.now()
