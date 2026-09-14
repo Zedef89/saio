@@ -68,6 +68,14 @@ export interface SessionRuntime {
  */
 const WORKING_RE = /esc to interrupt/i
 
+/**
+ * Lo spinner sopra la casella: "✢ Meandering… (3m 17s · ↓ 3.4k tokens)". C'e' per tutto il
+ * tempo in cui elabora, mentre "esc to interrupt" col piè di pagina pieno ("6 memories
+ * recalled") la CLI 2.1.260 non lo scrive — albatros lavorava da minuti e la card la dava
+ * libera. Finito il turno diventa "✻ Cooked for 3m · done", che non ha il cronometro fra parentesi.
+ */
+const SPINNER_RE = /^\s*\S\s+[A-Z][\w-]*(?:…|\.\.\.)\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+s\b/
+
 /** Domande esplicite, con o senza menu numerato. */
 const ASK_RE = /do you want to proceed|do you want to|vuoi (che|procedere)|\(y\/n\)|press enter to continue|esc to cancel/i
 
@@ -257,7 +265,14 @@ export function classifyScreen(raw: string, now = Date.now()): ScreenState {
   if (looksLikeChoiceMenu(screen)) activity = 'waiting'
   // Se sta elaborando, sta elaborando: una domanda piu' in alto e' quella a cui hai gia'
   // risposto, e senza questa precedenza la card direbbe "aspetta te" mentre lavora.
-  else if (WORKING_RE.test(screen) || WORKFLOW_WAIT_RE.test(lastConvo) || workflowRunning) activity = 'working'
+  else if (
+    WORKING_RE.test(screen) ||
+    WORKFLOW_WAIT_RE.test(lastConvo) ||
+    workflowRunning ||
+    // Sotto lo spinner puo' esserci un "⎿ Tip: …": si guardano le ultime righe, non solo l'ultima.
+    (!scrolled && convo.filter((l) => l.trim()).slice(-6).some((l) => SPINNER_RE.test(l)))
+  )
+    activity = 'working'
   // Domanda in chiaro senza menu ("vuoi che…?"): conta solo se e' l'ultima cosa a schermo.
   else if (ASK_RE.test(screen.split('\n').filter((l) => l.trim()).slice(-8).join('\n'))) activity = 'waiting'
   else activity = CLAUDE_UI_RE.test(screen) ? 'idle' : 'shell'
