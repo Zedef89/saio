@@ -43,9 +43,22 @@ export interface SessionAccountInfo {
   resetsAt: string | null
 }
 
+/**
+ * La sessione e' ferma sul limite dell'account ("You've hit your session limit · resets
+ * 11:40am (UTC)"). Non e' `waiting`: non aspetta te, aspetta l'ora scritta li'. Da quell'ora
+ * basta un messaggio per farla ripartire — lo manda lib/limit-resume.ts.
+ */
+export interface SessionLimit {
+  /** `session` (finestra di 5 ore), `weekly`, o quello che la CLI scrive al posto loro. */
+  kind: string
+  /** Quando si sblocca, in ISO. */
+  resetsAt: string
+}
+
 export interface SessionRuntime {
   account: SessionAccountInfo | null
   activity: SessionActivity
+  limit: SessionLimit | null
 }
 
 /**
@@ -83,6 +96,172 @@ function looksLikeChoiceMenu(screen: string): boolean {
  * ancore: se nessuna compare, nella pane non c'e' Claude ma una shell.
  */
 const CLAUDE_UI_RE = /auto mode on|shift\+tab to cycle|for agents|\/(status|effort)\b/i
+
+/**
+ * Claude ha lanciato un workflow e aspetta che finisca: "✻ Waiting for 1 dynamic workflow to
+ * finish". Sta lavorando anche se "esc to interrupt" non c'e' — e aprirla non serve a niente.
+ * Conta solo come ULTIMA riga prima della casella: finito il workflow, la stessa frase resta
+ * piu' in alto nella videata.
+ */
+const WORKFLOW_WAIT_RE = /waiting for \d+ (?:dynamic )?workflows? to finish/i
+
+/** Workflow in corso nel piè di pagina: "◯ nome… 21/103 agents done · 7m 28s". */
+const WORKFLOW_RUNNING_RE = /(\d+)\/(\d+) agents done/i
+
+/**
+ * "You've hit your session limit · resets 11:40am (UTC)" e
+ * "You've hit your weekly limit · resets Aug 28, 9am (UTC)": sono le due forme trovate in
+ * migliaia di transcript sulla devbox. Il fuso fra parentesi e' sempre UTC, ma si accetta
+ * qualunque fuso IANA.
+ */
+const LIMIT_RE =
+  /hit your ([a-z-]+(?: [a-z-]+)?) limit\s*[·∙•]\s*resets\s+(?:([A-Za-z]{3})[a-z]*\.? (\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i
+
+const SEPARATOR_RE = /^\s*─{20,}\s*$/
+
+/**
+ * La videata in tre parti: la conversazione, la casella dove si scrive (fra le ultime due
+ * righe di ─) e il piè di pagina. Senza la casella (TUI non ancora disegnata) e' tutto
+ * conversazione.
+ */
+function splitScreen(screen: string): { convo: string[]; input: string[]; footer: string[] } {
+  const lines = screen.split('\n')
+  const seps: number[] = []
+  lines.forEach((l, i) => SEPARATOR_RE.test(l) && seps.push(i))
+  if (seps.length < 2) return { convo: lines, input: [], footer: [] }
+  const [a, b] = seps.slice(-2)
+  return { convo: lines.slice(0, a), input: lines.slice(a + 1, b), footer: lines.slice(b + 1) }
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** Scarto fra il fuso e UTC in quell'istante, in ms. Fuso sconosciuto: alza. */
+function tzOffsetMs(timeZone: string, at: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  }).formatToParts(new Date(at))
+  const p = (t: string) => Number(parts.find((x) => x.type === t)?.value)
+  return Date.UTC(p('year'), p('month') - 1, p('day'), p('hour'), p('minute'), p('second')) - Math.floor(at / 1000) * 1000
+}
+
+/** Ora "da muro" in quel fuso → istante UTC. */
+function zonedToUtc(timeZone: string, y: number, mo: number, d: number, h: number, mi: number): number {
+  const guess = Date.UTC(y, mo, d, h, mi)
+  return guess - tzOffsetMs(timeZone, guess)
+}
+
+/**
+ * L'istante del reset scritto nel messaggio. Senza data ("resets 11:40am") il giorno si
+ * deduce: e' il prossimo 11:40 se cade entro la finestra del limite (5 ore per quello di
+ * sessione, un giorno per gli altri), altrimenti l'11:40 gia' passato — il limite si e' gia'
+ * sbloccato e la sessione e' ferma solo perche' nessuno le ha scritto.
+ */
+export function resolveLimitReset(
+  m: { kind: string; month?: string; day?: string; hour: string; minute?: string; ampm: string; tz: string },
+  now = Date.now(),
+): number | null {
+  const tz = m.tz.trim()
+  let h = Number(m.hour) % 12
+  if (m.ampm.toLowerCase() === 'pm') h += 12
+  const mi = Number(m.minute || 0)
+  try {
+    const today = new Date(now + tzOffsetMs(tz, now)) // "adesso" letto sull'orologio di quel fuso
+    const y = today.getUTCFullYear()
+    if (m.month && m.day) {
+      const mo = MONTHS.indexOf(m.month.slice(0, 3).toLowerCase())
+      if (mo < 0) return null
+      const at = zonedToUtc(tz, y, mo, Number(m.day), h, mi)
+      // "resets Jan 2" letto il 30 dicembre e' dell'anno dopo.
+      return at < now - 180 * 86_400_000 ? zonedToUtc(tz, y + 1, mo, Number(m.day), h, mi) : at
+    }
+    const window = /session/i.test(m.kind) ? 6 * 3_600_000 : 25 * 3_600_000
+    const candidates = [-1, 0, 1].map((dd) => zonedToUtc(tz, y, today.getUTCMonth(), today.getUTCDate() + dd, h, mi))
+    const future = candidates.find((c) => c > now && c <= now + window)
+    if (future) return future
+    return Math.max(...candidates.filter((c) => c <= now))
+  } catch {
+    return null // fuso che Intl non conosce: meglio nessuna ripresa che una all'ora sbagliata
+  }
+}
+
+/**
+ * Il limite e' lo stato ATTUALE della sessione solo se dopo il messaggio non c'e' stato altro:
+ * ne' un messaggio tuo ("❯ riprendi") ne' una risposta di Claude. Restano ammessi gli avvisi
+ * di fine workflow, che arrivano anche mentre la sessione e' ferma e portano lo stesso limite.
+ */
+function currentLimit(convo: string[], now: number): SessionLimit | null {
+  let idx = -1
+  let m: RegExpMatchArray | null = null
+  for (let i = convo.length - 1; i >= 0; i--) {
+    const hit = convo[i].match(LIMIT_RE)
+    if (hit) {
+      idx = i
+      m = hit
+      break
+    }
+  }
+  if (!m) return null
+  for (const l of convo.slice(idx + 1)) {
+    if (/^\s*❯\s*\S/.test(l)) return null
+    if (/^\s*●\s/.test(l) && !/^\s*●\s*Dynamic workflow\b/i.test(l)) return null
+  }
+  const at = resolveLimitReset(
+    { kind: m[1], month: m[2], day: m[3], hour: m[4], minute: m[5], ampm: m[6], tz: m[7] },
+    now,
+  )
+  return at == null ? null : { kind: m[1].toLowerCase(), resetsAt: new Date(at).toISOString() }
+}
+
+export interface ScreenState {
+  activity: SessionActivity
+  limit: SessionLimit | null
+  /** Nella casella c'e' gia' del testo: scriverci sopra lo mescolerebbe con il tuo. */
+  inputDirty: boolean
+}
+
+/** Colori e link (OSC 8) di `capture-pane -e`: per leggere il testo servono via. */
+const stripAnsi = (s: string) => s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+
+/**
+ * Tutto quello che si ricava da una videata catturata CON i colori (`capture-pane -e`).
+ * Pura: la si prova su una videata salvata.
+ */
+export function classifyScreen(raw: string, now = Date.now()): ScreenState {
+  const screen = stripAnsi(raw)
+  const { convo, footer } = splitScreen(screen)
+  // Dopo una risposta la CLI scrive nella casella, in grigio (`\x1b[2m`), il messaggio che si
+  // aspetta: non l'ha battuto nessuno. Si toglie il grigio, e quello che resta e' di una persona.
+  // Stessa regola di rigaOccupata in prompt-in-sessione.ts (ramo semiloop-revisioni).
+  const input = splitScreen(raw.replace(/\x1b\[2m.*?(?:\x1b\[(?:0|22)m|$)/gm, '')).input.map(stripAnsi)
+  const inputDirty = input.some((l) => l.replace(/^\s*❯/, '').replace(/ /g, ' ').trim() !== '')
+  // "Jump to bottom": la TUI e' scrollata indietro e mostra roba vecchia — un limite o un
+  // "waiting for workflow" li' non dicono niente dello stato di adesso.
+  const scrolled = /jump to bottom/i.test(screen)
+  const limit = scrolled ? null : currentLimit(convo, now)
+  const lastConvo = scrolled ? '' : convo.filter((l) => l.trim()).pop() || ''
+  const workflowRunning = footer.some((l) => {
+    const w = l.match(WORKFLOW_RUNNING_RE)
+    return !!w && Number(w[1]) < Number(w[2])
+  })
+  let activity: SessionActivity
+  // Un menu del TUI blocca davvero la sessione: vale anche se in videata resta un
+  // "esc to interrupt" di poco prima.
+  if (looksLikeChoiceMenu(screen)) activity = 'waiting'
+  // Se sta elaborando, sta elaborando: una domanda piu' in alto e' quella a cui hai gia'
+  // risposto, e senza questa precedenza la card direbbe "aspetta te" mentre lavora.
+  else if (WORKING_RE.test(screen) || WORKFLOW_WAIT_RE.test(lastConvo) || workflowRunning) activity = 'working'
+  // Domanda in chiaro senza menu ("vuoi che…?"): conta solo se e' l'ultima cosa a schermo.
+  else if (ASK_RE.test(screen.split('\n').filter((l) => l.trim()).slice(-8).join('\n'))) activity = 'waiting'
+  else activity = CLAUDE_UI_RE.test(screen) ? 'idle' : 'shell'
+  return { activity, limit, inputDirty }
+}
 
 export interface ProcRow {
   pid: number
@@ -166,26 +345,23 @@ function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAcc
   }
 }
 
-/** Sta elaborando? Si guarda la videata, non il carico: mentre aspetta l'API la CPU e' a zero. */
-export async function readActivity(session: string, dataDir = DATA_DIR()): Promise<SessionActivity> {
+/** La videata della sessione, letta e classificata. Si guarda lo schermo, non il carico: mentre aspetta l'API la CPU e' a zero. */
+export async function readScreen(session: string, dataDir = DATA_DIR()): Promise<ScreenState> {
   try {
     // Il target va chiuso con i due punti (`=nome:`): senza, tmux non risolve la finestra corrente
     // della sessione e capture-pane torna vuoto — ogni sessione sembrerebbe una shell.
     const { tmuxSuSessione } = await import('./tmux-cmd')
-    const { stdout } = await tmuxSuSessione(dataDir, session, ['capture-pane', '-p', '-t', `=${session}:`], { timeout: 4000, maxBuffer: 2_000_000 })
-    // Un menu del TUI blocca davvero la sessione: vale anche se in videata resta un
-    // "esc to interrupt" di poco prima.
-    if (looksLikeChoiceMenu(stdout)) return 'waiting'
-    // Se sta elaborando, sta elaborando: una domanda piu' in alto e' quella a cui hai gia'
-    // risposto, e senza questa precedenza la card direbbe "aspetta te" mentre lavora.
-    if (WORKING_RE.test(stdout)) return 'working'
-    // Domanda in chiaro senza menu ("vuoi che…?"): conta solo se e' l'ultima cosa a schermo.
-    const coda = stdout.split('\n').filter((l) => l.trim()).slice(-8).join('\n')
-    if (ASK_RE.test(coda)) return 'waiting'
-    return CLAUDE_UI_RE.test(stdout) ? 'idle' : 'shell'
+    // `-e`: i colori servono a distinguere il suggerimento grigio della CLI da una frase battuta.
+    const { stdout } = await tmuxSuSessione(dataDir, session, ['capture-pane', '-p', '-e', '-t', `=${session}:`], { timeout: 4000, maxBuffer: 2_000_000 })
+    return classifyScreen(stdout)
   } catch {
-    return 'shell'
+    return { activity: 'shell', limit: null, inputDirty: false }
   }
+}
+
+/** Sta elaborando? */
+export async function readActivity(session: string, dataDir = DATA_DIR()): Promise<SessionActivity> {
+  return (await readScreen(session, dataDir)).activity
 }
 
 /**
@@ -221,7 +397,8 @@ export async function sessionRuntimes(dataDir = DATA_DIR()): Promise<Record<stri
           const slot = slotFromConfigDir(await readConfigDir(claudePid))
           account = toAccountInfo(byId.get(slot), slot)
         }
-        out[pane.name] = { account, activity: claudePid ? await readActivity(pane.name) : 'shell' }
+        const screen = claudePid ? await readScreen(pane.name) : null
+        out[pane.name] = { account, activity: screen?.activity ?? 'shell', limit: screen?.limit ?? null }
       })
     )
   } catch (err) {

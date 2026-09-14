@@ -40,6 +40,8 @@ interface TmuxSession {
    * 'idle' = libero al prompt · 'shell' = nessun Claude nella pane.
    */
   activity?: 'working' | 'waiting' | 'idle' | 'shell'
+  /** Ferma sul limite dell'account: all'ora di `resetsAt` SAIO la fa ripartire da sola. */
+  limit?: { kind: string; resetsAt: string } | null
   /** Chi ha aperto la sessione, dedotto dal prefisso del nome. */
   owner?: { slug: string; name: string } | null
 }
@@ -319,6 +321,20 @@ export function SessionsPage() {
     prevActivity.current = now
   }, [sessions])
 
+  // Una sessione che si ferma sul limite si segnala una volta: non serve aprirla, riparte da sola.
+  const prevLimit = useRef<Record<string, string> | null>(null)
+  useEffect(() => {
+    const now: Record<string, string> = {}
+    for (const s of sessions) if (s.limit) now[s.name] = s.limit.resetsAt
+    const before = prevLimit.current
+    if (before) {
+      for (const [name, at] of Object.entries(now)) {
+        if (before[name] !== at) toast.warning(`"${name}" è ferma sul limite: ${resetLabel(at).replace(/^reset/, 'riparte da sola')}`)
+      }
+    }
+    prevLimit.current = now
+  }, [sessions])
+
   // Il permesso si chiede una volta sola; se negato restano i toast dentro la pagina.
   useEffect(() => {
     try {
@@ -419,7 +435,7 @@ export function SessionsPage() {
                 const chiuso = !!closedGroups[g.key]
                 const attivi = g.items.filter((x) => x.activity === 'working').length
                 const inAttesa = g.items.filter((x) => x.activity === 'waiting').length
-                const fermi = g.items.filter((x) => x.account?.exhausted).length
+                const fermi = g.items.filter((x) => x.account?.exhausted || x.limit).length
                 return (
                 <div key={g.key} className="mb-1">
                   <button
@@ -509,6 +525,14 @@ export function SessionsPage() {
                           {exhausted && (
                             <span className="flex items-center gap-0.5 text-red-400" title={resetLabel(s.account?.resetsAt ?? null)}>
                               <Ban className="w-2.5 h-2.5" /> limite finito
+                            </span>
+                          )}
+                          {s.limit && !exhausted && (
+                            <span
+                              className="flex items-center gap-0.5 text-red-400"
+                              title="Ferma sul limite dell'account: all'ora del reset SAIO le scrive di riprendere"
+                            >
+                              <Ban className="w-2.5 h-2.5" /> a limite · {resetLabel(s.limit.resetsAt).replace(/^reset/, 'riparte')}
                             </span>
                           )}
                           {working && <span className="text-amber-400">· sta lavorando</span>}

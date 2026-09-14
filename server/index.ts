@@ -21,6 +21,7 @@ import { metricsRouter } from './routes/metrics'
 import { mcpRouter } from './routes/mcp'
 import { credentialsRouter } from './routes/credentials'
 import { startSessionBridge } from './lib/session-bridge'
+import { startLimitResume } from './lib/limit-resume'
 import { sshRouter } from './routes/ssh'
 import { vpsRouter } from './routes/vps'
 import { mcpDiscoveryRouter } from './routes/mcp-discovery'
@@ -455,6 +456,10 @@ httpServer.on('error', (err: Error) => {
 // due sessioni sullo stesso repo possono annunciarsi come impone il manuale.
 // Vedi lib/session-bridge.ts.
 startSessionBridge()
+
+// Una sessione ferma sul limite dell'account riparte da sola all'ora scritta nel messaggio.
+// Vedi lib/limit-resume.ts.
+startLimitResume()
 
 startListen()
 

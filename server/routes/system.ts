@@ -237,6 +237,7 @@ export function systemRouter(): Router {
             worktree,
             account: runtime?.account ?? null,
             activity: runtime?.activity ?? 'shell',
+            limit: runtime?.limit ?? null,
             owner: ownerFromName(name, owners),
           }
         })
