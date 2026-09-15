@@ -199,7 +199,13 @@ async function createTmuxSession(body: { name: string; projectId: string | null;
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.message || data.error || 'Creazione fallita')
-  return data as { name: string; created: boolean; alreadyExisted?: boolean }
+  return data as {
+    name: string
+    created: boolean
+    alreadyExisted?: boolean
+    /** Worktree isolato in cui è partita la sessione, quando se n'è potuto creare uno. */
+    worktree?: { path: string; branch: string; created: boolean } | null
+  }
 }
 
 async function fetchPlaywright(): Promise<{ instances: PwInstance[]; counts: { servers: number; browsers: number } }> {
@@ -322,7 +328,12 @@ export function SessionsPage() {
       setShowNew(false)
       setSelected(data.name) // apre subito la sessione appena creata
       toast.success(
-        data.alreadyExisted ? `Sessione "${data.name}" già attiva` : `Sessione "${data.name}" creata`
+        data.alreadyExisted ? `Sessione "${data.name}" già attiva` : `Sessione "${data.name}" creata`,
+        // Il branch è l'informazione che serve subito dopo: la sessione non è nel checkout
+        // condiviso ma in un worktree tuo, e il lavoro andrà mergiato da lì.
+        data.worktree
+          ? { description: `worktree ${data.worktree.created ? 'nuovo' : 'riusato'} · branch ${data.worktree.branch}` }
+          : undefined
       )
     },
     onError: (err: Error) => toast.error('Creazione fallita', { description: err.message }),

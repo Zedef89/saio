@@ -595,6 +595,8 @@ export function systemRouter(): Router {
       }
 
       let cwd = persona ? persona.devRoot : process.env.HOME || '/root'
+      /** Worktree isolato in cui e' finita la sessione, quando se n'e' potuto creare uno. */
+      let worktree: { path: string; branch: string; created: boolean } | null = null
       if (projectId) {
         const { projectsStore } = await import('../lib/projects-store')
         const project = await projectsStore.findById(projectId)
@@ -616,6 +618,34 @@ export function systemRouter(): Router {
           return
         }
         cwd = p
+
+        // Worktree dedicato a chi apre, come gia' fanno le card progetto: sul checkout
+        // condiviso due persone sullo stesso repo si cambiano il branch sotto i piedi a
+        // vicenda. Se non si puo' fare (repo assente, `git worktree add` fallito) si resta
+        // sul checkout con un warning: meglio una sessione non isolata che nessuna sessione.
+        //
+        // Chi ha un utente Unix suo resta invece nella sua area: WORKTREES_ROOT sta sotto la
+        // home del processo (root), e un worktree creato li' lei non potrebbe nemmeno leggerlo.
+        if (requester && !persona) {
+          try {
+            const { getIdentity, ensureWorktree, isGitRepo } = await import('../lib/worktree')
+            if (await isGitRepo(cwd)) {
+              const identity = await getIdentity(DATA_DIR(), requester)
+              const wt = await ensureWorktree(cwd, identity, { label: rawName })
+              if ('error' in wt) {
+                logger.warn(`[tmux] "${name}": worktree non creato (${wt.error}) → uso ${cwd}`)
+              } else {
+                for (const m of wt.warnings) logger.warn(`[tmux] "${name}": ${m}`)
+                cwd = wt.path
+                worktree = { path: wt.path, branch: wt.branch, created: wt.created }
+              }
+            }
+          } catch (err) {
+            logger.warn(`[tmux] "${name}": worktree saltato: ${String(err).slice(0, 200)}`)
+          }
+        } else if (persona) {
+          logger.info(`[tmux] "${name}": ${persona.user} ha un'area sua → nessun worktree, si lavora in ${cwd}`)
+        }
       }
 
       // L'identita' git di CHI apre, sulla cartella in cui la sessione lavorera' davvero.
@@ -697,8 +727,8 @@ export function systemRouter(): Router {
       // Una sessione = un terminale su questa macchina, root per chi non ha un utente suo:
       // e' l'azione piu' pesante che l'interfaccia permette, e va nell'audit anche quando va
       // tutto bene. `utente` dice con quale identita' e' partita davvero.
-      auditAction(req, 'tmux.created', { name, cwd, projectId, utente: persona?.user || 'root', account: startClaude ? accountLabel : null })
-      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null })
+      auditAction(req, 'tmux.created', { name, cwd, projectId, branch: worktree?.branch || null, utente: persona?.user || 'root', account: startClaude ? accountLabel : null })
+      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null, worktree })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })
     }
