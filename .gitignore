@@ -80,6 +80,10 @@ Thumbs.db
 # Test artifacts (screenshots from Playwright sessions, not part of the codebase)
 *.png
 !src-tauri/icons/*.png
+# Le icone servite al browser (favicon + icone del manifest) sono asset di
+# prodotto, non screenshot di test: devono stare nel repo. Senza questa riga
+# il manifest puntava a icone inesistenti e Chrome Android rifiutava di installare.
+!public/*.png
 .playwright-cli/
 
 # V15.8 WS38 — tmp/ contiene JWT tokens effimeri + test artifacts (NEVER commit)

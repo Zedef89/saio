@@ -7,6 +7,7 @@ import { Toaster } from 'sonner'
 import App from './App'
 import './index.css'
 import './lib/i18n'
+import { registerServiceWorker } from './lib/pwa'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -19,6 +20,8 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+registerServiceWorker()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

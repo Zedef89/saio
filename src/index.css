@@ -69,6 +69,30 @@
   html, body, #root {
     @apply h-full;
   }
+
+  /* Il pull-to-refresh di Chrome Android e il rimbalzo di iOS partono
+     dall'overscroll del documento: qui si spengono senza togliere lo scroll. */
+  html, body {
+    overscroll-behavior: none;
+  }
+}
+
+/* PWA installata — 2026-09-15.
+   Il documento non scrolla: scorre #root. Cosi' la pagina non "scivola" sotto
+   il dito e non si trascina per ricaricarsi. Il padding safe-area di #root lo
+   mette gia' il blocco "PWA iOS" piu' sotto: qui solo il comportamento di scroll.
+   Nel browser normale non cambia nulla: la regola vale solo in standalone. */
+@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  #root {
+    height: 100%;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 
 @layer utilities {
