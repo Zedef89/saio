@@ -185,8 +185,31 @@ interface AccountSlot {
 const HOME = process.env.HOME || os.homedir()
 
 /**
- * `~/.claude` (default) + ogni `~/.claude-<slot>` che esiste davvero: lo slot e' il
- * suffisso, quindi un account nuovo si aggiunge creando la cartella e facendo il login,
+ * Una cartella `~/.claude-<slot>` e' un account solo se dentro c'e' davvero una config di
+ * Claude Code. Il nome da solo non basta: in home ci sono cartelle che si chiamano cosi' per
+ * tutt'altro motivo — `~/.claude-memory` e' un symlink alle memorie condivise
+ * (`/srv/taskless/memorie`), `~/.claude-memory-staging` una loro vecchia copia — e comparivano
+ * nella schermata "scegli l'account" come due account perennemente "non autenticato".
+ *
+ * Un account vero ha almeno uno di questi: le credenziali, il `.claude.json`, o la cartella
+ * `projects/` con le conversazioni. Chi ne ha uno con il token scaduto continua a comparire
+ * (con l'errore): quello e' un account da riloggare, non una cartella omonima.
+ */
+async function eUnaConfigClaude(dir: string): Promise<boolean> {
+  for (const prova of ['.credentials.json', '.claude.json', 'projects']) {
+    try {
+      await fs.stat(path.join(dir, prova))
+      return true
+    } catch {
+      /* passa al prossimo indizio */
+    }
+  }
+  return false
+}
+
+/**
+ * `~/.claude` (default) + ogni `~/.claude-<slot>` che contiene davvero una config: lo slot e'
+ * il suffisso, quindi un account nuovo si aggiunge creando la cartella e facendo il login,
  * senza toccare questo file.
  */
 async function discoverSlots(): Promise<AccountSlot[]> {
@@ -210,7 +233,10 @@ async function discoverSlots(): Promise<AccountSlot[]> {
           }
         }
       }
-      if (match) slots.push({ id: match[1], configDir: path.join(HOME, entry.name), isDefault: false })
+      if (match) {
+        const configDir = path.join(HOME, entry.name)
+        if (await eUnaConfigClaude(configDir)) slots.push({ id: match[1], configDir, isDefault: false })
+      }
     }
   } catch {
     /* home illeggibile: si va avanti col solo account di default */
