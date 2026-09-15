@@ -629,7 +629,7 @@ class PtyManager {
     opts: SpawnOptions
   ): Promise<{ dir: string; session: string } | null> {
     try {
-      const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles, applyIdentity } =
+      const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles, applyIdentity, spegniIdentitaCondivisa } =
         await import('./worktree')
       if (!(await isGitRepo(repoDir))) {
         logger.info(`[pty] ${projectName}: non è un repo git → worktree isolato saltato`)
@@ -662,6 +662,9 @@ class PtyManager {
         return null
       }
       for (const w of wt.warnings) logger.warn(`[pty] ${projectName}: ${w}`)
+      // L'identita' condivisa del repo vale per tutte le cartelle e tutte le persone: finche'
+      // c'e', un worktree senza la sua firma a nome dell'ultimo che l'ha impostata.
+      await spegniIdentitaCondivisa(repoDir, dataDir)
       await this.warnOverlaps(overlappingFiles, repoDir, wt.path, projectName)
       return { dir: wt.path, session: sessionNameFor(identity.slug, projectName) }
     } catch (err) {

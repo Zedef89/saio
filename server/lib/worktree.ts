@@ -52,6 +52,40 @@ export interface WorktreeInfo {
 // ─────────────────── Identità ───────────────────
 
 /**
+ * L'identità di un proprietario a partire dal suo slug (`alberto` → Alberto Giunta).
+ * Serve a rimettere a posto i worktree già esistenti, che nel nome portano lo slug di chi li
+ * ha creati ma non hanno mai avuto un'identità propria.
+ */
+export async function identityByEmail(dataDir: string, email: string): Promise<GitIdentity | null> {
+  const norm = email.toLowerCase().trim()
+  try {
+    const all = JSON.parse(await fsp.readFile(identitiesFile(dataDir), 'utf8')) as Record<string, Partial<GitIdentity>>
+    for (const [login, v] of Object.entries(all)) {
+      // Si cerca sia per indirizzo di login sia per indirizzo dei COMMIT: nel git log c'è il
+      // secondo (Alberto firma da Epicode, non dalla gmail con cui entra in SAIO).
+      if (login.toLowerCase() === norm || (v.email || '').toLowerCase() === norm) {
+        return getIdentity(dataDir, login)
+      }
+    }
+  } catch {
+    /* mappa assente */
+  }
+  return null
+}
+
+export async function identityBySlug(dataDir: string, slug: string): Promise<GitIdentity | null> {
+  try {
+    const all = JSON.parse(await fsp.readFile(identitiesFile(dataDir), 'utf8')) as Record<string, Partial<GitIdentity>>
+    for (const [email, v] of Object.entries(all)) {
+      if ((v.slug || slugFromEmail(email)) === slug) return getIdentity(dataDir, email)
+    }
+  } catch {
+    /* mappa assente: nessuna deduzione possibile */
+  }
+  return null
+}
+
+/**
  * Slug da email: `mele.nicola943@gmail.com` → `mele-nicola943`. Fragile per costruzione
  * (nessuno chiama la propria casella come sé stesso), quindi `git-identities.json` permette
  * di sovrascriverlo con un nome sensato.
@@ -345,6 +379,88 @@ export async function applyIdentity(
     warnings.push(`Identità git non applicata: ${msg.slice(0, 200)}`)
     logger.warn(`[worktree] identità non applicata su ${wtPath}: ${msg}`)
   }
+}
+
+/**
+ * Spegne l'identità **condivisa** del repo: quella in `.git/config`, che vale per tutte le
+ * cartelle di lavoro e per tutte le persone.
+ *
+ * È l'origine dell'unico modo che resta, dopo l'isolamento per worktree, di firmare a nome di
+ * un altro: git non sa chi è collegato a SAIO, legge l'identità dal repo su disco. Se lì c'è
+ * l'ultimo che l'ha impostata, i commit di chiunque escono col suo nome — è così che i commit
+ * di Nicola sono usciti come Alberto e viceversa.
+ *
+ * Toglierla fa fallire il commit di chi non ha un'identità propria ("Please tell me who you
+ * are"): è il punto. Meglio un commit che si ferma di uno che parte col nome sbagliato.
+ *
+ * Perché nessuno si trovi bloccato, prima si copre: ogni worktree senza identità propria ne
+ * riceve una, dedotta dal nome della cartella (`alberto--rev5` → Alberto) o, se non basta,
+ * dall'autore del suo ultimo commit. Se resta anche un solo worktree non attribuibile, il
+ * fallback NON viene tolto: si lascia il repo com'è e si dice perché.
+ */
+export async function spegniIdentitaCondivisa(
+  repoDir: string,
+  dataDir: string,
+): Promise<{ tolto: boolean; coperti: string[]; scoperti: string[] }> {
+  const coperti: string[] = []
+  const scoperti: string[] = []
+
+  // Niente identità condivisa da togliere: non c'è niente da fare.
+  const condivisa = await git(repoDir, ['config', '--local', '--get', 'user.email']).catch(() => '')
+  if (!condivisa) return { tolto: false, coperti, scoperti }
+
+  const lista = await git(repoDir, ['worktree', 'list', '--porcelain'])
+  const paths = lista
+    .split('\n')
+    .filter((r) => r.startsWith('worktree '))
+    .map((r) => r.slice('worktree '.length).trim())
+
+  for (const wt of paths) {
+    // Il checkout principale (sempre il primo) è di tutti: non gli si cuce addosso il nome di
+    // nessuno. Chi lo apre da SAIO riceve la propria identità all'apertura; chi ci entra da
+    // fuori deve dire chi è — che è esattamente ciò che vogliamo ottenere.
+    if (wt === paths[0]) continue
+    // Già a posto: ha la sua identità isolata.
+    const sua = await git(wt, ['config', '--worktree', '--get', 'user.email']).catch(() => '')
+    if (sua) continue
+
+    // `<slug>--<label>` è la forma che diamo noi ai worktree; il checkout principale e le
+    // cartelle create a mano non ce l'hanno, e per quelle si guarda chi ha fatto l'ultimo commit.
+    const slug = path.basename(wt).split('--')[0]
+    let identity = await identityBySlug(dataDir, slug)
+    if (!identity) {
+      const autore = await git(wt, ['log', '-1', '--format=%ae']).catch(() => '')
+      if (autore) identity = await identityByEmail(dataDir, autore)
+    }
+    if (!identity) {
+      scoperti.push(wt)
+      continue
+    }
+    const avvisi: string[] = []
+    await applyIdentity(wt, identity, avvisi)
+    coperti.push(`${path.basename(wt)} → ${identity.name}`)
+  }
+
+  // Le cartelle senza proprietario deducibile (worktree vecchi, creati a mano, con l'ultimo
+  // commit di qualcuno che non è nella mappa) restano senza identità: chi ci committa da fuori
+  // SAIO si sente chiedere chi è, e chi le riapre da SAIO la riceve all'apertura. È attrito,
+  // non un errore — l'alternativa è che continuino a firmare col nome dell'ultimo passato.
+  if (scoperti.length) {
+    logger.info(
+      `[worktree] ${path.basename(repoDir)}: ${scoperti.length} cartelle senza proprietario deducibile, ` +
+        'restano senza identità propria'
+    )
+  }
+
+  for (const chiave of ['user.name', 'user.email', 'core.sshCommand']) {
+    // exit 5 = la chiave non c'era: non è un errore.
+    await git(repoDir, ['config', '--local', '--unset-all', chiave]).catch(() => '')
+  }
+  logger.info(
+    `[worktree] ${path.basename(repoDir)}: identità condivisa rimossa (era ${condivisa}), ` +
+      `${coperti.length} cartelle messe a nome del loro proprietario`
+  )
+  return { tolto: true, coperti, scoperti }
 }
 
 /** Rimuove un worktree. Rifiuta se ha modifiche non committate, salvo `force`. */

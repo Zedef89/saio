@@ -666,6 +666,10 @@ export function systemRouter(): Router {
             await execFileAsync(g.file, g.args)
           })
           for (const m of avvisi) logger.warn(`[tmux] "${name}": ${m}`)
+          // E si spegne l'identita' condivisa del repo, se ne ha ancora una: e' l'ultimo modo
+          // rimasto di firmare a nome di un altro.
+          const { spegniIdentitaCondivisa } = await import('../lib/worktree')
+          await spegniIdentitaCondivisa(cwd, DATA_DIR())
         }
       } catch (err) {
         logger.warn(`[tmux] "${name}": identita' git non applicata su ${cwd}: ${String(err).slice(0, 200)}`)
