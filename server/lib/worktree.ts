@@ -312,13 +312,23 @@ export async function ensureWorktree(
  * nome di un altro, in silenzio. Successo davvero: dal 05/09/2026 al 08/09/2026 il checkout
  * condiviso di komanda-dashboard era firmato Alberto, e tre commit sono usciti a suo nome.
  */
-export async function applyIdentity(wtPath: string, identity: GitIdentity, warnings: string[]): Promise<void> {
+export async function applyIdentity(
+  wtPath: string,
+  identity: GitIdentity,
+  warnings: string[],
+  /**
+   * Come eseguire `git`. Serve a chi ha un utente Unix suo: se i comandi girano da root,
+   * `.git/config.worktree` diventa un file di root dentro il repo di quella persona e la sua
+   * sessione non riesce piu' a riscriverlo. Di default si esegue come l'utente corrente.
+   */
+  run: (dir: string, args: string[]) => Promise<unknown> = git,
+): Promise<void> {
   try {
-    await git(wtPath, ['config', 'extensions.worktreeConfig', 'true'])
-    await git(wtPath, ['config', '--worktree', 'user.name', identity.name])
-    await git(wtPath, ['config', '--worktree', 'user.email', identity.email])
+    await run(wtPath, ['config', 'extensions.worktreeConfig', 'true'])
+    await run(wtPath, ['config', '--worktree', 'user.name', identity.name])
+    await run(wtPath, ['config', '--worktree', 'user.email', identity.email])
     if (identity.sshKey) {
-      await git(wtPath, [
+      await run(wtPath, [
         'config',
         '--worktree',
         'core.sshCommand',

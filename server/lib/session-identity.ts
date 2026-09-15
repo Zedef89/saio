@@ -50,7 +50,11 @@ function identityDir(dataDir: string): string {
  * quello sbagliato, altrimenti la sessione si trova due identita' in conflitto (il saluto
  * della CLI e questa nota) senza sapere quale delle due vince.
  */
-export function identityPrompt(person: { name: string; email: string }): string {
+export function identityPrompt(
+  person: { name: string; email: string },
+  /** Nome e indirizzo con cui devono uscire i commit di questa persona. */
+  commit?: { name: string; email: string },
+): string {
   return [
     '# Chi sta usando questa sessione',
     '',
@@ -63,8 +67,19 @@ export function identityPrompt(person: { name: string; email: string }): string 
     'una persona presente: non usarlo mai per capire chi ti sta parlando, né per scegliere',
     "l'identità dei commit. Gli abbonamenti sono condivisi, le persone no.",
     '',
-    "L'identità git di questo worktree è già impostata da SAIO sulla persona qui sopra:",
-    'non cambiarla e non usare `git config --global`.',
+    // L'identita' git viene applicata da SAIO all'apertura, ma la cartella puo' essere stata
+    // usata prima da un altro (i worktree condividono `.git/config`): dare l'indirizzo giusto
+    // e' l'unico modo perche' la sessione se ne accorga invece di fidarsi di una promessa.
+    ...(commit
+      ? [
+          "L'identità git delle cartelle di lavoro è impostata da SAIO su",
+          `\`${commit.name} <${commit.email}>\`. **Prima di committare verifica che sia quella**`,
+          '(`git config user.email`): se ne trovi un\'altra è rimasta da chi ha lavorato lì prima,',
+          'e i tuoi commit uscirebbero a nome suo. In quel caso riapplicala sulla cartella in cui',
+          `stai lavorando (\`git config --worktree user.email '${commit.email}'\`) e dillo.`,
+        ]
+      : ["L'identità git di questo worktree è già impostata da SAIO sulla persona qui sopra."]),
+    'Non usare mai `git config --global`.',
   ].join('\n')
 }
 
@@ -101,7 +116,11 @@ export async function writeIdentityFile(
     // Nome dal mapping, email quella con cui la persona e' entrata in SAIO: `identity.email`
     // e' l'indirizzo dei COMMIT, che per qualcuno e' diverso da quello di login (Alberto
     // firma da Epicode) e come "chi ti sta parlando" sarebbe fuorviante.
-    await fs.writeFile(file, identityPrompt({ name: identity.name, email: email.trim() }), 'utf8')
+    await fs.writeFile(
+      file,
+      identityPrompt({ name: identity.name, email: email.trim() }, { name: identity.name, email: identity.email }),
+      'utf8',
+    )
     return file
   } catch (err) {
     logger.warn(`[identity] impossibile preparare la nota per ${email}:`, err)
@@ -127,7 +146,10 @@ export async function identityArgs(dataDir: string, email: string | null | undef
   if (!email || email === 'unknown') return []
   try {
     const identity = await getIdentity(dataDir, email)
-    return ['--append-system-prompt', identityPrompt({ name: identity.name, email: email.trim() })]
+    return [
+      '--append-system-prompt',
+      identityPrompt({ name: identity.name, email: email.trim() }, { name: identity.name, email: identity.email }),
+    ]
   } catch {
     return []
   }

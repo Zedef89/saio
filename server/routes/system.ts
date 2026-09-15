@@ -618,6 +618,29 @@ export function systemRouter(): Router {
         cwd = p
       }
 
+      // L'identita' git di CHI apre, sulla cartella in cui la sessione lavorera' davvero.
+      // Le sessioni aperte da qui non passano da `resolveWorktree` (quello e' il percorso
+      // delle card progetto): senza questo blocco la cartella restava firmata dall'ultimo che
+      // ci aveva lavorato, e i commit uscivano a nome suo — in silenzio, mentre la nota di
+      // identita' prometteva il contrario. Successo il 14/09/2026 su saio/src-repo: sessione
+      // di Nicola, `user.email` di Alberto.
+      try {
+        const { isGitRepo, getIdentity, applyIdentity } = await import('../lib/worktree')
+        if (requester && (await isGitRepo(cwd))) {
+          const identity = await getIdentity(DATA_DIR(), requester)
+          const avvisi: string[] = []
+          // I comandi git girano come la persona: da root lascerebbero un `config.worktree`
+          // che lei non puo' piu' riscrivere.
+          await applyIdentity(cwd, identity, avvisi, async (dir, args) => {
+            const g = comeLaPersona(persona, ['git', '-C', dir, ...args])
+            await execFileAsync(g.file, g.args)
+          })
+          for (const m of avvisi) logger.warn(`[tmux] "${name}": ${m}`)
+        }
+      } catch (err) {
+        logger.warn(`[tmux] "${name}": identita' git non applicata su ${cwd}: ${String(err).slice(0, 200)}`)
+      }
+
       // L'account arriva come id simbolico e viene risolto contro il registro:
       // nella riga di comando finisce solo una config dir nostra, mai input dell'utente.
       let claudeCmd = 'claude'
