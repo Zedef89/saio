@@ -596,7 +596,7 @@ export function systemRouter(): Router {
 
       let cwd = persona ? persona.devRoot : process.env.HOME || '/root'
       /** Worktree isolato in cui e' finita la sessione, quando se n'e' potuto creare uno. */
-      let worktree: { path: string; branch: string; created: boolean } | null = null
+      let worktree: { path: string; branch: string; created: boolean; base?: string; behind?: number } | null = null
       if (projectId) {
         const { projectsStore } = await import('../lib/projects-store')
         const project = await projectsStore.findById(projectId)
@@ -637,7 +637,7 @@ export function systemRouter(): Router {
               } else {
                 for (const m of wt.warnings) logger.warn(`[tmux] "${name}": ${m}`)
                 cwd = wt.path
-                worktree = { path: wt.path, branch: wt.branch, created: wt.created }
+                worktree = { path: wt.path, branch: wt.branch, created: wt.created, base: wt.base, behind: wt.behind }
               }
             }
           } catch (err) {

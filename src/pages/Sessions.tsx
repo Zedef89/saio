@@ -204,7 +204,14 @@ async function createTmuxSession(body: { name: string; projectId: string | null;
     created: boolean
     alreadyExisted?: boolean
     /** Worktree isolato in cui è partita la sessione, quando se n'è potuto creare uno. */
-    worktree?: { path: string; branch: string; created: boolean } | null
+    worktree?: {
+      path: string
+      branch: string
+      created: boolean
+      base?: string
+      /** Commit della base che nel branch non ci sono: quanto si riparte indietro. */
+      behind?: number
+    } | null
   }
 }
 
@@ -327,14 +334,16 @@ export function SessionsPage() {
       queryClient.invalidateQueries({ queryKey: ['tmux', 'sessions'] })
       setShowNew(false)
       setSelected(data.name) // apre subito la sessione appena creata
-      toast.success(
-        data.alreadyExisted ? `Sessione "${data.name}" già attiva` : `Sessione "${data.name}" creata`,
-        // Il branch è l'informazione che serve subito dopo: la sessione non è nel checkout
-        // condiviso ma in un worktree tuo, e il lavoro andrà mergiato da lì.
-        data.worktree
-          ? { description: `worktree ${data.worktree.created ? 'nuovo' : 'riusato'} · branch ${data.worktree.branch}` }
-          : undefined
-      )
+      const wt = data.worktree
+      // Riaprire un worktree vecchio è il modo silenzioso di lavorare su codice che su staging
+      // non esiste più: se è indietro, il toast lo dice e resta finché non lo chiudi.
+      const indietro = wt?.behind ? ` · ${wt.behind} commit dietro ${wt.base || 'la base'}` : ''
+      const titolo = data.alreadyExisted ? `Sessione "${data.name}" già attiva` : `Sessione "${data.name}" creata`
+      const dettaglio = wt
+        ? { description: `worktree ${wt.created ? 'nuovo' : 'riusato'} · branch ${wt.branch}${indietro}` }
+        : undefined
+      if (wt?.behind) toast.warning(titolo, { ...dettaglio, duration: Infinity })
+      else toast.success(titolo, dettaglio)
     },
     onError: (err: Error) => toast.error('Creazione fallita', { description: err.message }),
   })

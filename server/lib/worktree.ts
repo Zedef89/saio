@@ -303,6 +303,15 @@ export interface EnsureWorktreeResult {
   created: boolean
   /** Warning non bloccanti (identità git incompleta, ecc.). */
   warnings: string[]
+  /** Da dove e' stato staccato il branch (`origin/staging`, di norma). */
+  base?: string
+  /**
+   * Quanti commit della base NON sono nel branch. Zero appena creato; alto quando si riapre
+   * un worktree vecchio, ed e' l'informazione che nessuno aveva: su komanda-dashboard i
+   * worktree fermi da settimane erano indietro di centinaia di commit, e chi ci rientrava
+   * lavorava su un codice che su staging non esiste piu' — se ne accorgeva al merge.
+   */
+  behind?: number
 }
 
 /**
@@ -329,7 +338,16 @@ export async function ensureWorktree(
   if (fs.existsSync(wtPath) && (await isGitRepo(wtPath))) {
     await applyIdentity(wtPath, identity, warnings)
     const cur = await git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
-    return { path: wtPath, branch: cur, created: false, warnings }
+    // Non lo si riallinea da soli: dentro può esserci lavoro a metà, e un rebase deciso da
+    // SAIO sarebbe la sorpresa peggiore. Si dice quanto è indietro e si lascia scegliere.
+    const riferimento = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true }))
+    const behind = Number(
+      await git(wtPath, ['rev-list', '--count', `HEAD..${riferimento}`]).catch(() => '0'),
+    )
+    if (behind > 0) {
+      logger.info(`[worktree] ${project}: ${dirName} riusato, ${behind} commit dietro ${riferimento}`)
+    }
+    return { path: wtPath, branch: cur, created: false, warnings, base: riferimento, behind }
   }
 
   const base = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true }))
@@ -358,7 +376,7 @@ export async function ensureWorktree(
   }
 
   await applyIdentity(wtPath, identity, warnings)
-  return { path: wtPath, branch, created: true, warnings }
+  return { path: wtPath, branch, created: true, warnings, base, behind: 0 }
 }
 
 /**
