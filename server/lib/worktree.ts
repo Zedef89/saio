@@ -164,14 +164,39 @@ export async function isGitRepo(dir: string): Promise<boolean> {
 }
 
 /** Branch base da cui staccare: staging se c'è, poi main, poi master, poi HEAD corrente. */
-export async function resolveBaseBranch(repoDir: string): Promise<string> {
+export async function resolveBaseBranch(
+  repoDir: string,
+  /**
+   * Aggiorna il ref remoto prima di rispondere. Va acceso quando dal risultato si stacca un
+   * branch nuovo, spento quando serve solo mostrare il nome della base: il `staging` locale
+   * del checkout condiviso e' spesso indietro di giorni (21 commit su komanda-dashboard il
+   * 15/09/2026), e un worktree creato da li' nasce vecchio senza che nessuno lo dica.
+   */
+  opts: { fetch?: boolean } = {},
+): Promise<string> {
   for (const candidate of BASE_BRANCH_PREFERENCE) {
-    try {
-      await git(repoDir, ['rev-parse', '--verify', '--quiet', candidate])
-      return candidate
-    } catch {
-      /* prova il prossimo */
+    const remoto = `origin/${candidate}`
+    const esisteRemoto = await git(repoDir, ['rev-parse', '--verify', '--quiet', remoto]).then(
+      () => true,
+      () => false,
+    )
+    if (esisteRemoto) {
+      if (opts.fetch) {
+        try {
+          await git(repoDir, ['fetch', '--quiet', 'origin', candidate])
+        } catch (err) {
+          // Rete assente o remoto irraggiungibile: si parte dall'ultimo stato noto invece di
+          // non partire. Vale la pena saperlo dal log se poi il branch sembra vecchio.
+          logger.warn(`[worktree] fetch di ${candidate} fallito: ${String(err).slice(0, 120)}`)
+        }
+      }
+      return remoto
     }
+    const esisteLocale = await git(repoDir, ['rev-parse', '--verify', '--quiet', candidate]).then(
+      () => true,
+      () => false,
+    )
+    if (esisteLocale) return candidate
   }
   return git(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD'])
 }
@@ -307,7 +332,7 @@ export async function ensureWorktree(
     return { path: wtPath, branch: cur, created: false, warnings }
   }
 
-  const base = opts.baseBranch || (await resolveBaseBranch(repoDir))
+  const base = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true }))
   await fsp.mkdir(path.dirname(wtPath), { recursive: true })
 
   try {
@@ -322,7 +347,9 @@ export async function ensureWorktree(
     }
     const args = branchExists
       ? ['worktree', 'add', wtPath, branch]
-      : ['worktree', 'add', '-b', branch, wtPath, base]
+      : // `--no-track`: partendo da `origin/staging` git farebbe di quello l'upstream del
+        // branch nuovo, e un `git pull` distratto tirerebbe staging dentro il lavoro in corso.
+        ['worktree', 'add', '-b', branch, wtPath, base, '--no-track']
     await git(repoDir, args)
     logger.info(`[worktree] ${project}: creato ${dirName} (branch ${branch}, base ${base})`)
   } catch (err) {
