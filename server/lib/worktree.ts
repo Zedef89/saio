@@ -22,6 +22,13 @@ import { logger } from './logger'
 
 const exec = promisify(execFile)
 
+/**
+ * Come eseguire `git`. Il default gira come l'utente del processo (root); chi ha un utente
+ * Unix suo passa un runner che lo esegue come lei, o i file creati sarebbero di root dentro
+ * la sua area e non potrebbe piu' toccarli.
+ */
+export type GitRunner = (dir: string, args: string[]) => Promise<string>
+
 /** Radice dei worktree: fuori dai repo, così non finiscono mai in un `git status`. */
 export const WORKTREES_ROOT = path.join(os.homedir(), 'dev', '.worktrees')
 
@@ -172,18 +179,19 @@ export async function resolveBaseBranch(
    * del checkout condiviso e' spesso indietro di giorni (21 commit su komanda-dashboard il
    * 15/09/2026), e un worktree creato da li' nasce vecchio senza che nessuno lo dica.
    */
-  opts: { fetch?: boolean } = {},
+  opts: { fetch?: boolean; run?: GitRunner } = {},
 ): Promise<string> {
+  const g = opts.run || git
   for (const candidate of BASE_BRANCH_PREFERENCE) {
     const remoto = `origin/${candidate}`
-    const esisteRemoto = await git(repoDir, ['rev-parse', '--verify', '--quiet', remoto]).then(
+    const esisteRemoto = await g(repoDir, ['rev-parse', '--verify', '--quiet', remoto]).then(
       () => true,
       () => false,
     )
     if (esisteRemoto) {
       if (opts.fetch) {
         try {
-          await git(repoDir, ['fetch', '--quiet', 'origin', candidate])
+          await g(repoDir, ['fetch', '--quiet', 'origin', candidate])
         } catch (err) {
           // Rete assente o remoto irraggiungibile: si parte dall'ultimo stato noto invece di
           // non partire. Vale la pena saperlo dal log se poi il branch sembra vecchio.
@@ -192,13 +200,13 @@ export async function resolveBaseBranch(
       }
       return remoto
     }
-    const esisteLocale = await git(repoDir, ['rev-parse', '--verify', '--quiet', candidate]).then(
+    const esisteLocale = await g(repoDir, ['rev-parse', '--verify', '--quiet', candidate]).then(
       () => true,
       () => false,
     )
     if (esisteLocale) return candidate
   }
-  return git(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  return g(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD'])
 }
 
 /**
@@ -322,27 +330,43 @@ export interface EnsureWorktreeResult {
 export async function ensureWorktree(
   repoDir: string,
   identity: GitIdentity,
-  opts: { label?: string; baseBranch?: string } = {}
+  opts: {
+    label?: string
+    baseBranch?: string
+    /**
+     * Dove mettere i worktree. Default: `~/dev/.worktrees` del processo (root).
+     * Chi ha un utente Unix suo li vuole nella PROPRIA area (`/srv/taskless/<lei>/dev/.worktrees`):
+     * la radice di root e' `700`, e una sessione che root non e' non riuscirebbe nemmeno a
+     * entrarci. E' il motivo per cui finora restavano nel loro checkout condiviso.
+     */
+    root?: string
+    /** Come eseguire git: serve a farlo girare come la persona, non come root. */
+    run?: GitRunner
+    /** A chi appartengono le cartelle che creiamo noi, quando non e' l'utente del processo. */
+    owner?: { uid: number; gid: number }
+  } = {}
 ): Promise<EnsureWorktreeResult | { error: string }> {
+  const g = opts.run || git
   if (!(await isGitRepo(repoDir))) {
     return { error: `${repoDir} non è un repository git` }
   }
   const project = path.basename(repoDir)
   const label = opts.label || 'work'
   const dirName = worktreeDirName(identity.slug, label)
-  const wtPath = path.join(WORKTREES_ROOT, project, dirName)
+  const wtPath = path.join(opts.root || WORKTREES_ROOT, project, dirName)
   const branch = `${sanitizeBranchPart(identity.slug)}/${sanitizeBranchPart(label)}`
   const warnings: string[] = []
 
   // Già presente e sano → riuso.
   if (fs.existsSync(wtPath) && (await isGitRepo(wtPath))) {
-    await applyIdentity(wtPath, identity, warnings)
-    const cur = await git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
+    await applyIdentity(wtPath, identity, warnings, g)
+    const cur = await g(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
     // Non lo si riallinea da soli: dentro può esserci lavoro a metà, e un rebase deciso da
     // SAIO sarebbe la sorpresa peggiore. Si dice quanto è indietro e si lascia scegliere.
-    const riferimento = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true }))
+    const riferimento =
+      opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true, run: opts.run }))
     const behind = Number(
-      await git(wtPath, ['rev-list', '--count', `HEAD..${riferimento}`]).catch(() => '0'),
+      await g(wtPath, ['rev-list', '--count', `HEAD..${riferimento}`]).catch(() => '0'),
     )
     if (behind > 0) {
       logger.info(`[worktree] ${project}: ${dirName} riusato, ${behind} commit dietro ${riferimento}`)
@@ -350,15 +374,21 @@ export async function ensureWorktree(
     return { path: wtPath, branch: cur, created: false, warnings, base: riferimento, behind }
   }
 
-  const base = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true }))
-  await fsp.mkdir(path.dirname(wtPath), { recursive: true })
+  const base = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true, run: opts.run }))
+  // Le cartelle intermedie le crea il processo (root): se il worktree sara' di un'altra
+  // persona vanno intestate a lei, o `git worktree add` eseguito come lei non potrebbe
+  // scriverci dentro.
+  for (const dir of [path.dirname(path.dirname(wtPath)), path.dirname(wtPath)]) {
+    await fsp.mkdir(dir, { recursive: true })
+    if (opts.owner) await fsp.chown(dir, opts.owner.uid, opts.owner.gid).catch(() => {})
+  }
 
   try {
     // Un branch con lo stesso nome può essere avanzato da una sessione precedente: in quel
     // caso ci si riattacca invece di fallire.
     let branchExists = false
     try {
-      await git(repoDir, ['rev-parse', '--verify', '--quiet', branch])
+      await g(repoDir, ['rev-parse', '--verify', '--quiet', branch])
       branchExists = true
     } catch {
       /* branch nuovo */
@@ -368,14 +398,14 @@ export async function ensureWorktree(
       : // `--no-track`: partendo da `origin/staging` git farebbe di quello l'upstream del
         // branch nuovo, e un `git pull` distratto tirerebbe staging dentro il lavoro in corso.
         ['worktree', 'add', '-b', branch, wtPath, base, '--no-track']
-    await git(repoDir, args)
+    await g(repoDir, args)
     logger.info(`[worktree] ${project}: creato ${dirName} (branch ${branch}, base ${base})`)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return { error: `git worktree add fallito: ${msg.slice(0, 300)}` }
   }
 
-  await applyIdentity(wtPath, identity, warnings)
+  await applyIdentity(wtPath, identity, warnings, g)
   return { path: wtPath, branch, created: true, warnings, base, behind: 0 }
 }
 
@@ -446,15 +476,17 @@ export async function applyIdentity(
 export async function spegniIdentitaCondivisa(
   repoDir: string,
   dataDir: string,
+  run?: GitRunner,
 ): Promise<{ tolto: boolean; coperti: string[]; scoperti: string[] }> {
+  const g = run || git
   const coperti: string[] = []
   const scoperti: string[] = []
 
   // Niente identità condivisa da togliere: non c'è niente da fare.
-  const condivisa = await git(repoDir, ['config', '--local', '--get', 'user.email']).catch(() => '')
+  const condivisa = await g(repoDir, ['config', '--local', '--get', 'user.email']).catch(() => '')
   if (!condivisa) return { tolto: false, coperti, scoperti }
 
-  const lista = await git(repoDir, ['worktree', 'list', '--porcelain'])
+  const lista = await g(repoDir, ['worktree', 'list', '--porcelain'])
   const paths = lista
     .split('\n')
     .filter((r) => r.startsWith('worktree '))
@@ -466,7 +498,7 @@ export async function spegniIdentitaCondivisa(
     // fuori deve dire chi è — che è esattamente ciò che vogliamo ottenere.
     if (wt === paths[0]) continue
     // Già a posto: ha la sua identità isolata.
-    const sua = await git(wt, ['config', '--worktree', '--get', 'user.email']).catch(() => '')
+    const sua = await g(wt, ['config', '--worktree', '--get', 'user.email']).catch(() => '')
     if (sua) continue
 
     // `<slug>--<label>` è la forma che diamo noi ai worktree; il checkout principale e le
@@ -474,7 +506,7 @@ export async function spegniIdentitaCondivisa(
     const slug = path.basename(wt).split('--')[0]
     let identity = await identityBySlug(dataDir, slug)
     if (!identity) {
-      const autore = await git(wt, ['log', '-1', '--format=%ae']).catch(() => '')
+      const autore = await g(wt, ['log', '-1', '--format=%ae']).catch(() => '')
       if (autore) identity = await identityByEmail(dataDir, autore)
     }
     if (!identity) {
@@ -482,7 +514,8 @@ export async function spegniIdentitaCondivisa(
       continue
     }
     const avvisi: string[] = []
-    await applyIdentity(wt, identity, avvisi)
+    await applyIdentity(wt, identity, avvisi, g)
+    for (const m of avvisi) logger.warn(`[worktree] ${path.basename(wt)}: ${m}`)
     coperti.push(`${path.basename(wt)} → ${identity.name}`)
   }
 
@@ -499,7 +532,7 @@ export async function spegniIdentitaCondivisa(
 
   for (const chiave of ['user.name', 'user.email', 'core.sshCommand']) {
     // exit 5 = la chiave non c'era: non è un errore.
-    await git(repoDir, ['config', '--local', '--unset-all', chiave]).catch(() => '')
+    await g(repoDir, ['config', '--local', '--unset-all', chiave]).catch(() => '')
   }
   logger.info(
     `[worktree] ${path.basename(repoDir)}: identità condivisa rimossa (era ${condivisa}), ` +

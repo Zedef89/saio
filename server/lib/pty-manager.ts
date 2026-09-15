@@ -626,7 +626,9 @@ class PtyManager {
   private async resolveWorktree(
     repoDir: string,
     projectName: string,
-    opts: SpawnOptions
+    opts: SpawnOptions,
+    /** Utente Unix della sessione, quando ne ha uno suo: i worktree vanno nella sua area. */
+    persona: PersonaUnix | null = null
   ): Promise<{ dir: string; session: string } | null> {
     try {
       const { getIdentity, ensureWorktree, isGitRepo, overlappingFiles, applyIdentity, spegniIdentitaCondivisa } =
@@ -638,25 +640,38 @@ class PtyManager {
       // index.ts popola DASHBOARD_DATA_DIR all'avvio: stesso pattern di ssh-inventory.
       const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
       const identity = await getIdentity(dataDir, opts.userEmail!)
+      // git eseguito come la persona: i file creati da root nella sua area sarebbero suoi
+      // solo di nome, e non riuscirebbe piu' a scriverci.
+      const runGit = async (dir: string, args: string[]): Promise<string> => {
+        const { comeLaPersona } = await import('./persona-unix')
+        const g = comeLaPersona(persona, ['git', '-C', dir, ...args])
+        const { stdout } = await execFileAsync(g.file, g.args, { maxBuffer: 8 * 1024 * 1024 })
+        return stdout.trim()
+      }
 
       // Worktree scelto esplicitamente dalla UI fra quelli esistenti. L'identità va
       // RIAPPLICATA: quel worktree può averne già una — di chi l'ha usato prima — e senza
       // questa riga i commit di questa sessione uscirebbero a nome suo.
       if (opts.worktreePath && fs.existsSync(opts.worktreePath)) {
         const w: string[] = []
-        await applyIdentity(opts.worktreePath, identity, w)
+        await applyIdentity(opts.worktreePath, identity, w, runGit)
         for (const m of w) logger.warn(`[pty] ${projectName}: ${m}`)
         await this.warnOverlaps(overlappingFiles, repoDir, opts.worktreePath, projectName)
         return { dir: opts.worktreePath, session: sessionNameFor(identity.slug, projectName) }
       }
 
-      const wt = await ensureWorktree(repoDir, identity, { label: opts.worktreeLabel })
+      const wt = await ensureWorktree(repoDir, identity, {
+        label: opts.worktreeLabel,
+        root: persona ? path.join(persona.devRoot, '.worktrees') : undefined,
+        run: runGit,
+        owner: persona ? { uid: persona.uid, gid: persona.gid } : undefined,
+      })
       if ('error' in wt) {
         // Si ripiega sul checkout condiviso — ma prima gli si mette addosso l'identità di
         // chi apre la sessione. Senza, resta quella dell'ultimo che ci ha lavorato: è il
         // caso in cui i commit escono firmati da un collega senza che nessuno se ne accorga.
         const w: string[] = []
-        await applyIdentity(repoDir, identity, w)
+        await applyIdentity(repoDir, identity, w, runGit)
         for (const m of w) logger.warn(`[pty] ${projectName}: ${m}`)
         logger.warn(`[pty] ${projectName}: worktree non creato (${wt.error}) → uso la working copy come ${identity.slug}`)
         return null
@@ -664,7 +679,7 @@ class PtyManager {
       for (const w of wt.warnings) logger.warn(`[pty] ${projectName}: ${w}`)
       // L'identita' condivisa del repo vale per tutte le cartelle e tutte le persone: finche'
       // c'e', un worktree senza la sua firma a nome dell'ultimo che l'ha impostata.
-      await spegniIdentitaCondivisa(repoDir, dataDir)
+      await spegniIdentitaCondivisa(repoDir, dataDir, runGit)
       await this.warnOverlaps(overlappingFiles, repoDir, wt.path, projectName)
       return { dir: wt.path, session: sessionNameFor(identity.slug, projectName) }
     } catch (err) {
@@ -853,7 +868,7 @@ class PtyManager {
       let __dir = path.join(__devRoot, __tmuxName)
       let __session = __tmuxName
       if (process.env.SAIO_ISOLATED_WORKTREES === 'true' && opts.userEmail) {
-        const wt = await this.resolveWorktree(__dir, __tmuxName, opts)
+        const wt = await this.resolveWorktree(__dir, __tmuxName, opts, __persona)
         if (wt) {
           __dir = wt.dir
           __session = wt.session

@@ -594,6 +594,14 @@ export function systemRouter(): Router {
         return
       }
 
+      // git eseguito come la persona della sessione (come root, se non ne ha una): vale sia per
+      // il worktree sia per l'identita' scritta dentro.
+      const gitComeLaPersona = async (dir: string, args: string[]): Promise<string> => {
+        const g = comeLaPersona(persona, ['git', '-C', dir, ...args])
+        const { stdout } = await execFileAsync(g.file, g.args, { maxBuffer: 8 * 1024 * 1024 })
+        return stdout.trim()
+      }
+
       let cwd = persona ? persona.devRoot : process.env.HOME || '/root'
       /** Worktree isolato in cui e' finita la sessione, quando se n'e' potuto creare uno. */
       let worktree: { path: string; branch: string; created: boolean; base?: string; behind?: number } | null = null
@@ -624,14 +632,20 @@ export function systemRouter(): Router {
         // vicenda. Se non si puo' fare (repo assente, `git worktree add` fallito) si resta
         // sul checkout con un warning: meglio una sessione non isolata che nessuna sessione.
         //
-        // Chi ha un utente Unix suo resta invece nella sua area: WORKTREES_ROOT sta sotto la
-        // home del processo (root), e un worktree creato li' lei non potrebbe nemmeno leggerlo.
-        if (requester && !persona) {
+        // Chi ha un utente Unix suo li ha nella PROPRIA area, creati come lei: la radice dei
+        // worktree di root e' `700`, e i file creati da root nella sua area non li potrebbe
+        // piu' toccare.
+        if (requester) {
           try {
             const { getIdentity, ensureWorktree, isGitRepo } = await import('../lib/worktree')
             if (await isGitRepo(cwd)) {
               const identity = await getIdentity(DATA_DIR(), requester)
-              const wt = await ensureWorktree(cwd, identity, { label: rawName })
+              const wt = await ensureWorktree(cwd, identity, {
+                label: rawName,
+                root: persona ? path.join(persona.devRoot, '.worktrees') : undefined,
+                run: gitComeLaPersona,
+                owner: persona ? { uid: persona.uid, gid: persona.gid } : undefined,
+              })
               if ('error' in wt) {
                 logger.warn(`[tmux] "${name}": worktree non creato (${wt.error}) → uso ${cwd}`)
               } else {
@@ -643,8 +657,6 @@ export function systemRouter(): Router {
           } catch (err) {
             logger.warn(`[tmux] "${name}": worktree saltato: ${String(err).slice(0, 200)}`)
           }
-        } else if (persona) {
-          logger.info(`[tmux] "${name}": ${persona.user} ha un'area sua → nessun worktree, si lavora in ${cwd}`)
         }
       }
 
@@ -661,15 +673,12 @@ export function systemRouter(): Router {
           const avvisi: string[] = []
           // I comandi git girano come la persona: da root lascerebbero un `config.worktree`
           // che lei non puo' piu' riscrivere.
-          await applyIdentity(cwd, identity, avvisi, async (dir, args) => {
-            const g = comeLaPersona(persona, ['git', '-C', dir, ...args])
-            await execFileAsync(g.file, g.args)
-          })
+          await applyIdentity(cwd, identity, avvisi, gitComeLaPersona)
           for (const m of avvisi) logger.warn(`[tmux] "${name}": ${m}`)
           // E si spegne l'identita' condivisa del repo, se ne ha ancora una: e' l'ultimo modo
           // rimasto di firmare a nome di un altro.
           const { spegniIdentitaCondivisa } = await import('../lib/worktree')
-          await spegniIdentitaCondivisa(cwd, DATA_DIR())
+          await spegniIdentitaCondivisa(cwd, DATA_DIR(), gitComeLaPersona)
         }
       } catch (err) {
         logger.warn(`[tmux] "${name}": identita' git non applicata su ${cwd}: ${String(err).slice(0, 200)}`)
