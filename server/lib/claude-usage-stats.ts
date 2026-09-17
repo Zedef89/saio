@@ -33,6 +33,12 @@ const TAIL_IDS = 64
 /** Una riscansione completa non ha senso piu' spesso di cosi': i file crescono, non cambiano. */
 const RESCAN_MIN_MS = 30_000
 
+/** Ogni quanti file si salva lo stato, per non ripartire da zero dopo un riavvio. */
+const CHECKPOINT_FILE = 250
+
+/** Ogni quanto gira la scansione per conto suo, senza aspettare che qualcuno apra la pagina. */
+const SCAN_PERIODO_MS = 15 * 60_000
+
 export interface TokenBucket {
   requests: number
   input: number
@@ -104,7 +110,10 @@ interface StatsCache {
   updatedAt: string | null
 }
 
-const CACHE_VERSION = 1
+// 2 (17/09/2026): la scoperta degli account saltava i symlink, quindi la cache contiene
+// aggregati veri solo per `default` e residui parziali di b/c/d/e fermi al 03/09. Rileggere
+// quei transcript senza azzerare sommerebbe due volte i giorni gia' contati: si riparte.
+const CACHE_VERSION = 2
 
 function cacheFile(): string {
   const dataDir = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
@@ -142,13 +151,32 @@ async function saveCache(): Promise<void> {
   }
 }
 
-/** `~/.claude` e ogni `~/.claude-<slot>`: stessa regola di scoperta di claude-accounts.ts. */
+/**
+ * `~/.claude` e ogni `~/.claude-<slot>`: stessa regola di scoperta di claude-accounts.ts.
+ *
+ * ⚠️ **Gli slot sono symlink, e `Dirent.isDirectory()` su un symlink e' `false`.** Dal
+ * 05/09/2026 le cartelle degli account vivono in `/srv/taskless/account-claude/` e da `/root`
+ * ci sono solo i collegamenti: da quel giorno il filtro `entry.isDirectory()` ha scartato
+ * b, c, d ed e, e la pagina Utilizzo ha mostrato i consumi di un account su cinque senza
+ * dirlo. Qui si guarda cosa c'e' in fondo al collegamento, non di che tipo e' la voce; e si
+ * tiene solo chi ha davvero una cartella `projects`, cosi' un `.claude-memory` non diventa
+ * un account.
+ */
 async function discoverAccountDirs(): Promise<Array<{ id: string; projectsDir: string }>> {
   const out = [{ id: 'default', projectsDir: path.join(HOME, '.claude', 'projects') }]
   try {
     for (const entry of await fs.readdir(HOME, { withFileTypes: true })) {
-      const m = entry.isDirectory() ? /^\.claude-([a-zA-Z0-9_-]+)$/.exec(entry.name) : null
-      if (m) out.push({ id: m[1], projectsDir: path.join(HOME, entry.name, 'projects') })
+      const m = /^\.claude-([a-zA-Z0-9_-]+)$/.exec(entry.name)
+      if (!m) continue
+      const projectsDir = path.join(HOME, entry.name, 'projects')
+      try {
+        // `stat` segue il symlink: e' la domanda giusta ("c'e' una cartella projects?"),
+        // non "questa voce e' una directory?".
+        if (!(await fs.stat(projectsDir)).isDirectory()) continue
+      } catch {
+        continue
+      }
+      out.push({ id: m[1], projectsDir })
     }
   } catch {
     /* home illeggibile */
@@ -346,6 +374,10 @@ async function runScan(): Promise<void> {
       state.size = st.size
       state.mtimeMs = st.mtimeMs
       c.files[file] = state
+
+      // Checkpoint: la prima scansione legge qualche GB e dura minuti. Senza, un riavvio del
+      // server a meta' strada buttava tutto il lavoro e la cache restava alla data vecchia.
+      if (scannedFiles % CHECKPOINT_FILE === 0) await saveCache()
     }
 
     // File spariti (sessioni cancellate): via dallo stato, i loro token restano negli aggregati.
@@ -429,6 +461,24 @@ function aggrega(c: StatsCache, accountId: string): AccountTokenStats {
     lastDay: giorni[giorni.length - 1] ?? null,
     files: Object.keys(c.files).length,
   }
+}
+
+/**
+ * Tiene i numeri aggiornati da sola, ogni quarto d'ora.
+ *
+ * Prima la scansione partiva **solo** quando qualcuno apriva la pagina Utilizzo: nessuno l'ha
+ * aperta fra l'11 e il 17/09/2026 e per sei giorni il semaforo dei consumi ha mostrato dati
+ * vecchi come se fossero di oggi. Un dato che si aggiorna solo se guardato non e' un
+ * monitoraggio.
+ */
+export function avviaScansionePeriodica(): void {
+  const giro = () =>
+    void runScan().catch((err) =>
+      logger.warn(`[usage-stats] scansione periodica fallita: ${String(err).slice(0, 160)}`),
+    )
+  // Il primo giro dopo un minuto: all'avvio il server ha di meglio da fare.
+  setTimeout(giro, 60_000).unref?.()
+  setInterval(giro, SCAN_PERIODO_MS).unref?.()
 }
 
 /**

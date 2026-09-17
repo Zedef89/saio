@@ -389,6 +389,11 @@ httpServer.once('listening', () => {
   logger.info(`🚀 Dashboard server running on http://${HOST}:${PORT}`)
   logger.info(`🔌 WebSocket PTY endpoint: ws://${HOST}:${PORT}/api/pty/:projectId`)
   logger.info(`📁 Data dir: ${DATA_DIR}`)
+  // I token consumati si ricontano da soli: prima dipendevano da chi apriva la pagina
+  // Utilizzo, e fra l'11 e il 17/09/2026 nessuno l'ha aperta per sei giorni.
+  void import('./lib/claude-usage-stats')
+    .then((m) => m.avviaScansionePeriodica())
+    .catch((err) => logger.warn(`[usage-stats] avvio periodico fallito: ${String(err).slice(0, 120)}`))
 })
 
 function startListen(): void {
