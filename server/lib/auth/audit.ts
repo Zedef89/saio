@@ -35,6 +35,7 @@ export type AuditEventType =
   | 'tmux.created'
   | 'tmux.killed'
   | 'tmux.account.switched'
+  | 'tmux.relabeled'
   // Il cancello: chi cambia una regola dei permessi, e chi decide una richiesta. Senza
   // queste righe una concessione resta senza autore, e una concessione senza autore e'
   // indistinguibile da un aggiramento.

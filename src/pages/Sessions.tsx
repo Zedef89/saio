@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   TerminalSquare, Trash2, RefreshCw, Loader2, Folder, Circle, Globe, Server, Cpu,
-  Maximize2, Minimize2, Plus, Ban, UserRound, ArrowLeftRight, ChevronDown, ChevronRight, Hand,
+  Maximize2, Minimize2, Plus, Ban, UserRound, ArrowLeftRight, ChevronDown, ChevronRight, Hand, Pencil,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -47,6 +47,8 @@ interface TmuxSession {
   limit?: { kind: string; resetsAt: string } | null
   /** Chi ha aperto la sessione, dedotto dal prefisso del nome. */
   owner?: { slug: string; name: string } | null
+  /** Etichetta scritta a mano quando il nome non racconta piu' il lavoro; il nome resta quello. */
+  alias?: string | null
 }
 
 interface PwInstance {
@@ -83,6 +85,23 @@ async function switchSessionAccount(name: string, account: string, force = false
     throw err
   }
   return data as { from: string; to: string; transcript: string | null }
+}
+
+/**
+ * Cambia l'ETICHETTA, non il nome: la sessione tmux resta `nicola-studio-livekit` e tutto
+ * cio' che ci e' appeso (PTY, account, ripresa dal limite) continua a trovarla. Stringa
+ * vuota = si torna a leggere il nome.
+ */
+async function relabelSession(name: string, label: string) {
+  const res = await fetch(`/api/system/tmux-sessions/${encodeURIComponent(name)}/label`, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.message || data.error || 'Rinomina fallita')
+  return data as { name: string; label: string | null }
 }
 
 async function killTmuxSession(name: string) {
@@ -143,6 +162,14 @@ function prettySessionName(name: string, ownerSlug?: string | null): string {
   const senzaPrefisso = ownerSlug && name.startsWith(`${ownerSlug}-`) ? name.slice(ownerSlug.length + 1) : name
   return senzaPrefisso.replace(/[-_]+/g, ' ')
 }
+
+/** Quello che si legge nella lista: l'etichetta se c'e', altrimenti il nome ripulito. */
+function sessionLabel(s: TmuxSession): string {
+  return s.alias || prettySessionName(s.name, s.owner?.slug)
+}
+
+/** Quanto puo' essere lunga l'etichetta: stesso limite del server (session-alias.ts). */
+const MAX_LABEL = 60
 
 /** "reset oggi 14:00" / "reset mar 14:00" — la finestra settimanale non si legge in ISO. */
 function resetLabel(iso: string | null): string {
@@ -286,6 +313,19 @@ export function SessionsPage() {
       }
       toast.error('Cambio account fallito', { description: err.message })
     },
+  })
+
+  // Sessione con l'etichetta in modifica, e il testo mentre lo si scrive.
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+
+  const relabelMutation = useMutation({
+    mutationFn: (v: { name: string; label: string }) => relabelSession(v.name, v.label),
+    onSuccess: () => {
+      setEditing(null)
+      queryClient.invalidateQueries({ queryKey: ['tmux', 'sessions'] })
+    },
+    onError: (err: Error) => toast.error('Rinomina fallita', { description: err.message }),
   })
 
   const killMutation = useMutation({
@@ -523,6 +563,36 @@ export function SessionsPage() {
                       isSel ? 'bg-primary/10 border-primary/40' : 'border-transparent hover:bg-accent/50'
                     )}
                   >
+                    {editing === s.name ? (
+                      /* Si cambia solo l'etichetta: il nome tmux sotto resta intatto, e con lui
+                         tutto cio' che lo usa come indirizzo (PTY, account, ripresa dal limite). */
+                      <div className="flex items-center gap-1 px-2 py-2">
+                        <Input
+                          autoFocus
+                          value={editText}
+                          maxLength={MAX_LABEL}
+                          onChange={(e) => setEditText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') relabelMutation.mutate({ name: s.name, label: editText })
+                            if (e.key === 'Escape') setEditing(null)
+                          }}
+                          placeholder={prettySessionName(s.name, s.owner?.slug)}
+                          title={`Nome della sessione: ${s.name} (non cambia)`}
+                          className="h-7 text-xs"
+                        />
+                        <Button
+                          size="sm"
+                          className="h-7 px-2 text-[10px]"
+                          onClick={() => relabelMutation.mutate({ name: s.name, label: editText })}
+                          disabled={relabelMutation.isPending}
+                        >
+                          {relabelMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Salva'}
+                        </Button>
+                        <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => setEditing(null)}>
+                          Annulla
+                        </Button>
+                      </div>
+                    ) : (
                     <div className="flex items-center gap-2 px-2 py-2">
                       <button className="flex-1 min-w-0 text-left" onClick={() => setSelected(s.name)}>
                         <div className="flex items-center gap-1.5">
@@ -546,7 +616,7 @@ export function SessionsPage() {
                             className={cn('text-xs font-medium truncate', exhausted && 'text-muted-foreground')}
                             title={s.name}
                           >
-                            {prettySessionName(s.name, s.owner?.slug)}
+                            {sessionLabel(s)}
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-muted-foreground flex-wrap">
@@ -619,12 +689,20 @@ export function SessionsPage() {
                               <ArrowLeftRight className="w-3.5 h-3.5" />
                             </button>
                           )}
+                          <button
+                            onClick={() => { setEditing(s.name); setEditText(s.alias || '') }}
+                            className="text-muted-foreground hover:text-primary"
+                            title="Cambia etichetta (il nome della sessione resta lo stesso)"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
                           <button onClick={() => setConfirmKill(s.name)} className="text-muted-foreground hover:text-destructive" title={`Termina "${s.name}"`}>
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       )}
                     </div>
+                    )}
                   </div>
                 )
                   })}
@@ -633,7 +711,8 @@ export function SessionsPage() {
               })}
             </div>
             <div className="p-2 border-t border-border text-[10px] text-muted-foreground">
-              Click per aprire. Il cestino termina <strong>una sola</strong> sessione.
+              Click per aprire. La matita cambia <strong>solo l'etichetta</strong> (vuota = torna il nome).
+              Il cestino termina <strong>una sola</strong> sessione.
             </div>
           </aside>
 
@@ -650,7 +729,10 @@ export function SessionsPage() {
                 <div className="px-4 py-2 border-b border-border bg-card/50 flex items-center gap-2">
                   <TerminalSquare className="w-4 h-4 text-muted-foreground shrink-0" />
                   <span className="text-sm font-semibold truncate" title={selected}>
-                    {prettySessionName(selected, sessions.find((x) => x.name === selected)?.owner?.slug)}
+                    {(() => {
+                      const s = sessions.find((x) => x.name === selected)
+                      return s ? sessionLabel(s) : prettySessionName(selected)
+                    })()}
                   </span>
                   {/* Il tutto-schermo vive dentro EmbeddedChat: vale sia qui che in Progetti */}
                   <Button size="sm" variant="ghost" className="ml-auto h-6 px-2 text-[10px]" onClick={() => setSelected(null)}>Chiudi vista</Button>

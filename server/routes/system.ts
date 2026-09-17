@@ -205,7 +205,13 @@ export function systemRouter(): Router {
       // quale sta ancora scrivendo. Non blocca: se fallisce, le card restano come prima.
       const { sessionRuntimes } = await import('../lib/tmux-runtime')
       const { knownOwners, ownerFromName } = await import('../lib/session-owner')
-      const [runtimes, owners] = await Promise.all([sessionRuntimes(), knownOwners(DATA_DIR())])
+      // L'etichetta scritta a mano quando il nome non racconta piu' il lavoro (session-alias.ts).
+      const { readAliases, aliasFor, pruneAliases } = await import('../lib/session-alias')
+      const [runtimes, owners, aliases] = await Promise.all([
+        sessionRuntimes(),
+        knownOwners(DATA_DIR()),
+        readAliases(DATA_DIR()),
+      ])
       const sessions = stdout
         .trim()
         .split('\n')
@@ -227,11 +233,13 @@ export function systemRouter(): Router {
           }
           const name = parts[0] || ''
           const runtime = runtimes[name]
+          const created = Number(parts[3]) || 0
           return {
             name,
             windows: Number(parts[1]) || 1,
             attached: parts[2] === '1',
-            created: Number(parts[3]) || 0,
+            created,
+            alias: aliasFor(aliases, name, created),
             cwd,
             project,
             worktree,
@@ -242,6 +250,9 @@ export function systemRouter(): Router {
           }
         })
         .filter((s) => s.name)
+      // Le etichette delle sessioni chiuse non servono piu': qui e' l'unico punto che sa
+      // quali esistono davvero. Non si aspetta e non puo' far fallire la lista.
+      void pruneAliases(DATA_DIR(), sessions.map((s) => ({ name: s.name, created: s.created })))
       res.json({ sessions })
     } catch {
       // tmux assente o nessuna sessione: lista vuota, non è un errore
@@ -540,6 +551,55 @@ export function systemRouter(): Router {
       res.json({ ok: true, killed: name })
     } catch (err) {
       res.status(500).json({ error: 'kill_failed', message: (err as Error).message })
+    }
+  })
+
+  // L'etichetta che la sessione mostra nella lista. NON rinomina la sessione tmux: il nome e'
+  // un identificatore (proprietario, PTY, runtime, ripresa dal limite) e cambiarlo li
+  // scollegherebbe tutti — il perche' per esteso sta in lib/session-alias.ts.
+  // body: { label } — stringa vuota = torna il nome.
+  router.patch('/tmux-sessions/:name/label', async (req, res) => {
+    const name = String(req.params.name || '')
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      res.status(400).json({ error: 'invalid_session_name' })
+      return
+    }
+    // Stesso cancello del kill: la lista e' comune a tutti, ma l'etichetta di una sessione la
+    // cambia chi ci lavora. Un invitato non ribattezza il lavoro di un collega.
+    const { canActOnSession } = await import('../lib/session-owner')
+    if (!(await canActOnSession(DATA_DIR(), name, req.user))) {
+      auditAction(req, 'access.denied', { method: 'PATCH', path: `/system/tmux-sessions/${name}/label`, reason: 'sessione di un altro utente' })
+      res.status(403).json({ error: 'not_your_session' })
+      return
+    }
+    try {
+      // La nascita si chiede a tmux, non al browser: e' cio' che lega l'etichetta a QUESTA
+      // sessione e non al prossimo che riusera' lo stesso nome.
+      //
+      // Il filtro `-f` invece di `display-message -t`: il target di tmux fa match per prefisso
+      // (`-t nicola-studio` beccherebbe `nicola-studio-livekit`) e qui leggeremmo la nascita
+      // della sessione sbagliata. `#{==:…}` e' un confronto esatto. Il nome e' gia' passato
+      // dalla whitelist qui sopra, quindi entra nel formato senza sorprese.
+      const { tmuxSuSessione } = await import('../lib/tmux-cmd')
+      let created = 0
+      try {
+        const { stdout } = await tmuxSuSessione(DATA_DIR(), name, [
+          'list-sessions', '-f', `#{==:#{session_name},${name}}`, '-F', '#{session_created}',
+        ])
+        created = Number(String(stdout).trim().split('\n')[0]) || 0
+      } catch {
+        /* nessun server tmux per quell'utente: la sessione non c'e' */
+      }
+      if (!created) {
+        res.status(404).json({ error: 'session_not_found' })
+        return
+      }
+      const { setAlias } = await import('../lib/session-alias')
+      const label = await setAlias(DATA_DIR(), name, created, String(req.body?.label ?? ''))
+      auditAction(req, 'tmux.relabeled', { name, label })
+      res.json({ ok: true, name, label })
+    } catch (err) {
+      res.status(500).json({ error: 'label_failed', message: (err as Error).message })
     }
   })
 
