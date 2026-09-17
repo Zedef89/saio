@@ -43,7 +43,7 @@
  * nessuno legge più — meglio tornare al problema noto che crearne uno nuovo.
  */
 import fs from 'node:fs/promises'
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { logger } from './logger'
@@ -62,7 +62,21 @@ function configDirs(): string[] {
   const dirs = [path.join(HOME, '.claude')]
   try {
     for (const entry of readdirSync(HOME, { withFileTypes: true })) {
-      if (entry.isDirectory() && /^\.claude-[a-zA-Z0-9_-]+$/.test(entry.name)) dirs.push(path.join(HOME, entry.name))
+      if (!/^\.claude-[a-zA-Z0-9_-]+$/.test(entry.name)) continue
+      const dir = path.join(HOME, entry.name)
+      try {
+        // `statSync` segue il symlink; `Dirent.isDirectory()` no. Dal 05/09/2026 gli account
+        // vivono in /srv/taskless/account-claude e da /root ci sono solo i collegamenti:
+        // con il controllo sulla dirent il ponte vedeva un account su cinque e, di fatto,
+        // era spento — proprio il guasto che esiste per evitare.
+        if (!statSync(dir).isDirectory()) continue
+        // E deve essere un account, non una cartella che si chiama cosi': `.claude-memory`
+        // e `.claude-memory-staging` sono le memorie condivise, e finivano qui dentro.
+        if (!existsSync(path.join(dir, 'sessions')) && !existsSync(path.join(dir, '.credentials.json'))) continue
+      } catch {
+        continue
+      }
+      dirs.push(dir)
     }
   } catch {
     /* home illeggibile: resta il solo account di default */
