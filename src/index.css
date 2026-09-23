@@ -320,6 +320,21 @@
   background-color: transparent !important;
 }
 
+/* Terminale a tutto schermo, su iPhone. `#root` ha -webkit-overflow-scrolling: touch, e su
+   iOS Safari un antenato con quella proprietà si prende i discendenti `position: fixed`: li
+   ancora a sé invece che alla viewport. Risultato, il box "tutto schermo" partiva sotto la
+   barra in alto, che restava lì a coprire il terminale. Finché il terminale è aperto a tutto
+   schermo la si disattiva — su iOS 13+ lo scorrimento per inerzia è comunque il default.
+   Chrome e Firefox ignorano la proprietà: per loro non cambia niente. */
+html.saio-terminal-fullscreen #root {
+  -webkit-overflow-scrolling: auto;
+  overflow: hidden;
+}
+/* E la barra in alto dell'app non serve mentre si guarda solo il terminale. */
+html.saio-terminal-fullscreen [data-app-chrome] {
+  display: none !important;
+}
+
 /* V15.9 WS43 — mobile dialog/sheet content height fix. Radix UI dialogs
    sometimes overflow on phones; cap to 100dvh and enable internal scroll. */
 @media (max-width: 640px) {

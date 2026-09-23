@@ -887,6 +887,16 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     })
   }, [])
 
+  // Finché il terminale è a tutto schermo lo dichiariamo su <html>: serve al CSS per
+  // disinnescare lo scroll-container che su iOS si prende il nostro box (vedi index.css)
+  // e per togliere di mezzo la barra dell'app.
+  useEffect(() => {
+    const root = document.documentElement
+    if (fullscreen) root.classList.add('saio-terminal-fullscreen')
+    else root.classList.remove('saio-terminal-fullscreen')
+    return () => root.classList.remove('saio-terminal-fullscreen')
+  }, [fullscreen])
+
   // Uscita dal fullscreen nativo con il tasto indietro o il gesto di sistema: senza questo
   // il box CSS restava aperto e la pagina sembrava incastrata a metà.
   useEffect(() => {

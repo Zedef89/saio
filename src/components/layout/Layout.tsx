@@ -33,7 +33,7 @@ export function Layout() {
       </Sheet>
 
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        <div className="flex items-center border-b border-border lg:border-none">
+        <div data-app-chrome className="flex items-center border-b border-border lg:border-none">
           <Button
             variant="ghost"
             size="icon"
