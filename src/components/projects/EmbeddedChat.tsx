@@ -149,6 +149,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
   const [nonce, setNonce] = useState(0)
   const [forceNew, setForceNew] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const wrapperRef = useRef<HTMLDivElement>(null)
   const [dragActive, setDragActive] = useState(false)
   // V14.1: tick incrementato a onopen/onclose del WS per derivare reattivamente
   // l'abilitazione dell'input bar dal readyState corrente di wsRef.
@@ -833,14 +834,68 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
   const inputDisabled = status !== 'ready' || !wsOpen
   void wsTick // forza il useMemo di disabled a re-leggere wsRef.current.readyState
 
-  // Entrando/uscendo da tutto schermo il contenitore cambia dimensione:
-  // il terminale va rifittato, altrimenti resta della misura precedente.
+  // Entrando/uscendo da tutto schermo il contenitore cambia dimensione: il terminale va
+  // rifittato, altrimenti resta della misura precedente. Su telefono il singolo timeout
+  // non bastava: le barre del browser si ritirano con un'animazione più lunga (e la
+  // tastiera virtuale cambia di nuovo l'altezza), quindi il fit cadeva su una misura
+  // intermedia e restava lì — righe sovrapposte e terminale che sembrava bloccato.
+  // Qui seguiamo il contenitore vero (ResizeObserver) più la viewport visibile.
   useEffect(() => {
-    const t = setTimeout(() => {
-      try { fitRef.current?.fit() } catch { /* ignore */ }
-    }, 60)
-    return () => clearTimeout(t)
-  }, [fullscreen])
+    const el = containerRef.current
+    if (!el) return
+    let raf = 0
+    const refit = () => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        try {
+          fitRef.current?.fit()
+          // il renderer DOM può lasciare i glifi della misura precedente
+          scrollRepaintRef.current?.()
+        } catch { /* ignore */ }
+      })
+    }
+    const ro = new ResizeObserver(refit)
+    ro.observe(el)
+    window.addEventListener('orientationchange', refit)
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', refit)
+    return () => {
+      cancelAnimationFrame(raf)
+      ro.disconnect()
+      window.removeEventListener('orientationchange', refit)
+      vv?.removeEventListener('resize', refit)
+    }
+  }, [fullscreen, nonce])
+
+  // Tutto schermo vero dove il browser lo concede (Android Chrome): senza Fullscreen API
+  // il box CSS copre la viewport ma barra indirizzi e barra di sistema restano lì, ed è
+  // proprio il "non mi entra a schermo intero". iOS Safari non la dà sui <div>: lì resta
+  // il solo takeover CSS, che da solo funziona.
+  const toggleFullscreen = useCallback(() => {
+    setFullscreen((f) => {
+      const next = !f
+      try {
+        if (next) {
+          const el = wrapperRef.current as (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> }) | null
+          const req = el?.requestFullscreen?.bind(el) || el?.webkitRequestFullscreen?.bind(el)
+          void req?.().catch(() => { /* niente API: resta il takeover CSS */ })
+        } else if (document.fullscreenElement) {
+          void document.exitFullscreen?.().catch(() => { /* ignore */ })
+        }
+      } catch { /* niente API: resta il takeover CSS */ }
+      return next
+    })
+  }, [])
+
+  // Uscita dal fullscreen nativo con il tasto indietro o il gesto di sistema: senza questo
+  // il box CSS restava aperto e la pagina sembrava incastrata a metà.
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) setFullscreen(false)
+    }
+    document.addEventListener('fullscreenchange', onFsChange)
+    return () => document.removeEventListener('fullscreenchange', onFsChange)
+  }, [])
 
   // Drag&drop di file sul terminale (desktop). In Tauri il drag&drop di file è gestito
   // a livello webview (gli eventi DOM 'drop' non arrivano) e ci dà direttamente il PATH
@@ -886,6 +941,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
 
   return (
     <div
+      ref={wrapperRef}
       className={cn(
         className,
         fullscreen && 'fixed inset-0 z-50 bg-background flex flex-col rounded-none border-0 overscroll-contain saio-fullscreen'
@@ -1022,7 +1078,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
             size="sm"
             variant="ghost"
             className="h-6 text-[10px] gap-1 text-muted-foreground hover:text-foreground"
-            onClick={() => setFullscreen((f) => !f)}
+            onClick={toggleFullscreen}
             title={fullscreen ? 'Esci da tutto schermo' : 'Tutto schermo'}
           >
             {fullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}

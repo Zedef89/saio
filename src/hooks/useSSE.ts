@@ -62,7 +62,8 @@ export function useSSE() {
                         message: 'Clicca per aprire il progetto',
                       })
                     } else if (task.status === 'done') {
-                      toast.success(`${task.title} completato`)
+                      // Niente toast: su telefono copriva il terminale proprio mentre la
+                      // sessione finiva. La notifica resta nel centro notifiche.
                       addNotification({
                         type: 'task_done',
                         projectId,
