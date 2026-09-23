@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { toast } from 'sonner'
 import { useNotifications } from '@/store/notificationStore'
 
 interface SSEEvent {
@@ -11,6 +10,9 @@ interface SSEEvent {
   timestamp?: string
 }
 
+// Niente toast qui: gli eventi arrivano da soli, e sul telefono un riquadro che compare
+// sopra la pagina copre proprio quello che si sta guardando. Ogni evento resta nel centro
+// notifiche (addNotification), che si apre quando si vuole.
 export function useSSE() {
   const qc = useQueryClient()
   const addNotification = useNotifications((s) => s.add)
@@ -27,9 +29,6 @@ export function useSSE() {
           case 'brief':
             qc.invalidateQueries({ queryKey: ['briefs'] })
             if (data.type === 'created') {
-              toast.info('Nuovo brief ricevuto', {
-                description: data.filename?.replace(/\.json$/, ''),
-              })
               addNotification({
                 type: 'info',
                 title: 'Nuovo brief',
@@ -51,10 +50,6 @@ export function useSSE() {
                   if (task.status !== prev) {
                     seenTasksRef.current.set(projectId, task.status)
                     if (task.status === 'waiting_user') {
-                      toast.warning(`${task.title} attende tua risposta`, {
-                        description: 'Vai alla finestra CMD per rispondere',
-                        duration: 10_000,
-                      })
                       addNotification({
                         type: 'waiting_user',
                         projectId,
@@ -71,7 +66,6 @@ export function useSSE() {
                         message: 'Le richieste sono state portate a termine',
                       })
                     } else if (task.status === 'failed') {
-                      toast.error(`${task.title} fallito`, { description: task.errorMessage })
                       addNotification({
                         type: 'task_failed',
                         projectId,

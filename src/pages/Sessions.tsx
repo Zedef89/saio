@@ -407,8 +407,9 @@ export function SessionsPage() {
         const finita = before[name] === 'working' && act === 'idle'
         if (!bloccata && !finita) continue
         const testo = bloccata ? `"${name}" aspetta una risposta` : `"${name}" ha finito di lavorare`
-        if (bloccata) toast.warning(testo)
-        else toast.success(testo)
+        // Niente toast: sul telefono coprivano mezza pagina proprio mentre si guardava una
+        // sessione, e l'informazione c'è già due volte — il pallino/"aspetta te" nella lista
+        // e la notifica di sistema qui sotto.
         try {
           if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
             new Notification(bloccata ? 'SAIO — serve una risposta' : 'SAIO — sessione pronta', { body: testo, tag: name })
@@ -429,13 +430,23 @@ export function SessionsPage() {
     const before = prevLimit.current
     if (before) {
       for (const [name, at] of Object.entries(now)) {
-        if (before[name] !== at) toast.warning(`"${name}" è ferma sul limite: ${resetLabel(at).replace(/^reset/, 'riparte da sola')}`)
+        if (before[name] === at) continue
+        // Come sopra: notifica di sistema, non un toast sopra la pagina.
+        const testo = `"${name}" è ferma sul limite: ${resetLabel(at).replace(/^reset/, 'riparte da sola')}`
+        try {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('SAIO — sessione in pausa', { body: testo, tag: `${name}-limit` })
+          }
+        } catch {
+          /* notifiche non disponibili */
+        }
       }
     }
     prevLimit.current = now
   }, [sessions])
 
-  // Il permesso si chiede una volta sola; se negato restano i toast dentro la pagina.
+  // Il permesso si chiede una volta sola; se negato resta la lista, che marca comunque
+  // le sessioni con "aspetta te".
   useEffect(() => {
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
