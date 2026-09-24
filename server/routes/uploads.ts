@@ -12,6 +12,7 @@ import { logger } from '../lib/logger'
  */
 const UPLOAD_ROOT = process.env.SAIO_UPLOAD_DIR || path.join(os.homedir(), 'SAIO-uploads')
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: audio lunghi e PDF pesanti
+const MAX_FILES = 20 // per caricamento: oltre, multer risponde "Too many files"
 
 // Whitelist: immagini, documenti, audio, testo/codice, archivi zip
 const ALLOWED_MIME = new Set([
@@ -83,7 +84,7 @@ export function uploadsRouter(): Router {
         cb(null, `${time}-${sanitizeName(file.originalname)}`)
       },
     }),
-    limits: { fileSize: MAX_FILE_SIZE, files: 5 },
+    limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES },
     fileFilter: (_req, file, cb) => {
       const ext = path.extname(file.originalname || '').toLowerCase()
       const okByExt = ALLOWED_EXT_FALLBACK.has(ext) && GENERIC_MIME.has(file.mimetype)
@@ -95,7 +96,7 @@ export function uploadsRouter(): Router {
   })
 
   router.post('/:projectId', (req, res) => {
-    upload.array('files', 5)(req, res, (err: unknown) => {
+    upload.array('files', MAX_FILES)(req, res, (err: unknown) => {
       if (err) {
         logger.warn(`[uploads] rifiutato: ${String((err as Error).message)}`)
         return res.status(400).json({ error: 'upload_failed', message: String((err as Error).message) })
