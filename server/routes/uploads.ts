@@ -14,7 +14,7 @@ const UPLOAD_ROOT = process.env.SAIO_UPLOAD_DIR || path.join(os.homedir(), 'SAIO
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: audio lunghi e PDF pesanti
 const MAX_FILES = 20 // per caricamento: oltre, multer risponde "Too many files"
 
-// Whitelist: immagini, documenti, audio, testo/codice, archivi zip
+// Whitelist: immagini, documenti, audio, testo/codice/HTML, archivi zip
 const ALLOWED_MIME = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/heic', 'image/heif', 'image/svg+xml',
   'application/pdf',
@@ -23,6 +23,7 @@ const ALLOWED_MIME = new Set([
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'text/plain', 'text/markdown', 'text/csv', 'application/json',
+  'text/html', 'application/xhtml+xml',
   'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
   'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/flac',
   'video/webm', 'video/mp4', 'video/quicktime',
@@ -32,9 +33,10 @@ const ALLOWED_MIME = new Set([
 /**
  * Estensioni ammesse anche quando il browser manda un MIME generico.
  * Safari/iOS e alcuni file manager marcano gli zip come `application/octet-stream`:
- * senza questo fallback l'export di una chat verrebbe rifiutato.
+ * senza questo fallback l'export di una chat verrebbe rifiutato. Stesso discorso
+ * per gli .html salvati da alcuni browser/app senza tipo.
  */
-const ALLOWED_EXT_FALLBACK = new Set(['.zip'])
+const ALLOWED_EXT_FALLBACK = new Set(['.zip', '.html', '.htm'])
 const GENERIC_MIME = new Set(['application/octet-stream', 'application/x-compressed', ''])
 
 function sanitizeName(name: string): string {
