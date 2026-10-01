@@ -185,7 +185,7 @@ export function systemRouter(): Router {
 
   // Sessioni tmux REALI della macchina (Nicola): il contatore "Sessioni" deve riflettere
   // quello che gira davvero sul Mac, non solo i PTY spawnati da SAIO.
-  router.get('/tmux-sessions', async (_req, res) => {
+  router.get('/tmux-sessions', async (req, res) => {
     try {
       const { execFile } = await import('node:child_process')
       const { promisify } = await import('node:util')
@@ -250,10 +250,18 @@ export function systemRouter(): Router {
           }
         })
         .filter((s) => s.name)
+      // Le sessioni che il semi-loop apre da solo (`<persona>-leva-…`, `<persona>-risolve-…`)
+      // portano il prefisso di una persona solo per avere i suoi accessi: girano nel tmux di
+      // root, nessuno le deve guardare e si cancellano da sole a fine lavoro. A un guest non
+      // si mostrano (Marco, 01/10/2026: le vedeva a suo nome e aprendole risultavano
+      // scollegate). L'owner le vede: e' lui che deve poter chiudere una sessione impazzita.
+      const delLoop = (s: { name: string; owner: { slug: string } | null }) =>
+        !!s.owner && /^(leva|risolve)-/.test(s.name.slice(s.owner.slug.length + 1))
+      const visibili = req.user?.role === 'owner' ? sessions : sessions.filter((s) => !delLoop(s))
       // Le etichette delle sessioni chiuse non servono piu': qui e' l'unico punto che sa
       // quali esistono davvero. Non si aspetta e non puo' far fallire la lista.
       void pruneAliases(DATA_DIR(), sessions.map((s) => ({ name: s.name, created: s.created })))
-      res.json({ sessions })
+      res.json({ sessions: visibili })
     } catch {
       // tmux assente o nessuna sessione: lista vuota, non è un errore
       res.json({ sessions: [] })
