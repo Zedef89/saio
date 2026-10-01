@@ -25,7 +25,7 @@ import type { ScreenState } from './tmux-runtime'
 const execFileAsync = promisify(execFile)
 
 /** Chi ha un numero: stesso elenco dell'hook. Una sessione di altri non avvisa nessuno. */
-const NUMERI: Record<string, string> = { nicola: '393933141966', alberto: '393272407929' }
+const NUMERI: Record<string, string> = { nicola: '393933141966', alberto: '393272407929', marco: '393883519027' }
 const EVOLUTION = 'https://evolution.komandaprint.com/message/sendText/komanda'
 /** Da quanto deve aspettare prima di avvisare: se sei li', rispondi prima. */
 const DOPO_MS = 3 * 60_000
