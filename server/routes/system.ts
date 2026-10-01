@@ -204,7 +204,7 @@ export function systemRouter(): Router {
       // lista non dice ne' quale sessione e' inutile aprire (account a limite finito) ne'
       // quale sta ancora scrivendo. Non blocca: se fallisce, le card restano come prima.
       const { sessionRuntimes } = await import('../lib/tmux-runtime')
-      const { knownOwners, ownerFromName } = await import('../lib/session-owner')
+      const { knownOwners, ownerFromName, ownerSlugForEmail } = await import('../lib/session-owner')
       // L'etichetta scritta a mano quando il nome non racconta piu' il lavoro (session-alias.ts).
       const { readAliases, aliasFor, pruneAliases } = await import('../lib/session-alias')
       const [runtimes, owners, aliases] = await Promise.all([
@@ -257,7 +257,12 @@ export function systemRouter(): Router {
       // scollegate). L'owner le vede: e' lui che deve poter chiudere una sessione impazzita.
       const delLoop = (s: { name: string; owner: { slug: string } | null }) =>
         !!s.owner && /^(leva|risolve)-/.test(s.name.slice(s.owner.slug.length + 1))
-      const visibili = req.user?.role === 'owner' ? sessions : sessions.filter((s) => !delLoop(s))
+      // Un owner le vede tutte TRANNE quelle a nome suo: Marco e' owner dal 01/10 e le sue
+      // non le vuole in lista; Nicola e Alberto continuano a vedere quelle di Marco.
+      const mio = req.user?.email ? await ownerSlugForEmail(DATA_DIR(), req.user.email) : null
+      const visibili = sessions.filter(
+        (s) => !delLoop(s) || (req.user?.role === 'owner' && s.owner?.slug !== mio),
+      )
       // Le etichette delle sessioni chiuse non servono piu': qui e' l'unico punto che sa
       // quali esistono davvero. Non si aspetta e non puo' far fallire la lista.
       void pruneAliases(DATA_DIR(), sessions.map((s) => ({ name: s.name, created: s.created })))
