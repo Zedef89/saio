@@ -121,7 +121,12 @@ def main() -> int:
     kickoff_msg = (
         f"Usa la skill /deep-research in modalita {mode.upper()} sul topic: {safe_query}. "
         f"Output: PDF + Markdown + HTML in ~/Documents/ come da default della skill. "
-        f"Se necessario plan mode, procedi autonomo."
+        f"Se necessario plan mode, procedi autonomo. "
+        # Il 03/10/2026 tre sessioni hanno rifatto la stessa ricerca sui tablet nello stesso
+        # giorno: la lavagna dei temi le mette in vista l'una all'altra.
+        f"Prima di iniziare: saio lavagna apri --tema ricerca-{slug[:40]} \"{safe_query[:100]}\" ; "
+        f"se segnala un'altra ricerca sullo stesso tema, parti dal suo risultato invece di rifarla. "
+        f"Alla fine: saio lavagna chiudi."
     )
 
     first_line = _clean(f"===== DEEP RESEARCH: {title} =====")

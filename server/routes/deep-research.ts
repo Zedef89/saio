@@ -51,7 +51,14 @@ export function deepResearchRouter() {
       const requester =
         req.user?.email || (req.headers['cf-access-authenticated-user-email'] as string) || null
       const sessionName = await withOwnerPrefix(`deepres-${slug}`.slice(0, 60), DATA_DIR(), requester)
-      const claudeCmd = withPermissionMode('claude')
+      // La nota «Chi sta usando questa sessione», come negli altri punti di spawn. Fino al
+      // 03/10/2026 qui mancava: le ricerche di Flavio partivano sull'abbonamento ufficio@ senza
+      // sapere chi le aveva chieste, e non sapevano a chi mandare il PDF.
+      const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
+      const claudeCmd = withIdentityFile(
+        withPermissionMode('claude'),
+        await writeIdentityFile(DATA_DIR(), requester),
+      )
 
       const child = spawn(pyExe, [DEEP_SCRIPT], {
         shell: false,

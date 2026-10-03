@@ -32,8 +32,15 @@ export type GitRunner = (dir: string, args: string[]) => Promise<string>
 /** Radice dei worktree: fuori dai repo, così non finiscono mai in un `git status`. */
 export const WORKTREES_ROOT = path.join(os.homedir(), 'dev', '.worktrees')
 
-/** Branch da cui staccare, in ordine di preferenza. */
-const BASE_BRANCH_PREFERENCE = ['staging', 'main', 'master']
+/**
+ * Branch da cui staccare, in ordine di preferenza.
+ *
+ * `main` prima di `staging` (manuale della devbox §9, dal 18/09/2026): un ramo nato da staging
+ * ha per genitore il lavoro non verificato di tutti, e non si porta in produzione da solo.
+ * Fino al 03/10/2026 qui c'era `['staging', 'main', 'master']`, e ogni sessione aperta da SAIO
+ * nasceva da staging: misura-leve 465 commit avanti a main, upload-lista 407, nuovo-contratto 62.
+ */
+const BASE_BRANCH_PREFERENCE = ['main', 'master', 'staging']
 
 export interface GitIdentity {
   /** Nome breve usato in sessioni tmux, branch e path. Solo [a-z0-9-]. */
@@ -170,7 +177,7 @@ export async function isGitRepo(dir: string): Promise<boolean> {
   }
 }
 
-/** Branch base da cui staccare: staging se c'è, poi main, poi master, poi HEAD corrente. */
+/** Branch base da cui staccare: main se c'è, poi master, poi staging, poi HEAD corrente. */
 export async function resolveBaseBranch(
   repoDir: string,
   /**
@@ -311,7 +318,7 @@ export interface EnsureWorktreeResult {
   created: boolean
   /** Warning non bloccanti (identità git incompleta, ecc.). */
   warnings: string[]
-  /** Da dove e' stato staccato il branch (`origin/staging`, di norma). */
+  /** Da dove e' stato staccato il branch (`origin/main`, di norma). */
   base?: string
   /**
    * Quanti commit della base NON sono nel branch. Zero appena creato; alto quando si riapre
@@ -360,6 +367,7 @@ export async function ensureWorktree(
   // Già presente e sano → riuso.
   if (fs.existsSync(wtPath) && (await isGitRepo(wtPath))) {
     await applyIdentity(wtPath, identity, warnings, g)
+    await linkNodeModules(repoDir, wtPath, warnings, g, opts.owner)
     const cur = await g(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
     // Non lo si riallinea da soli: dentro può esserci lavoro a metà, e un rebase deciso da
     // SAIO sarebbe la sorpresa peggiore. Si dice quanto è indietro e si lascia scegliere.
@@ -395,8 +403,8 @@ export async function ensureWorktree(
     }
     const args = branchExists
       ? ['worktree', 'add', wtPath, branch]
-      : // `--no-track`: partendo da `origin/staging` git farebbe di quello l'upstream del
-        // branch nuovo, e un `git pull` distratto tirerebbe staging dentro il lavoro in corso.
+      : // `--no-track`: partendo da `origin/main` git farebbe di quello l'upstream del
+        // branch nuovo, e un `git pull` distratto tirerebbe main dentro il lavoro in corso.
         ['worktree', 'add', '-b', branch, wtPath, base, '--no-track']
     await g(repoDir, args)
     logger.info(`[worktree] ${project}: creato ${dirName} (branch ${branch}, base ${base})`)
@@ -406,7 +414,49 @@ export async function ensureWorktree(
   }
 
   await applyIdentity(wtPath, identity, warnings, g)
+  await linkNodeModules(repoDir, wtPath, warnings, g, opts.owner)
   return { path: wtPath, branch, created: true, warnings, base, behind: 0 }
+}
+
+/**
+ * Un worktree nuovo non ha `node_modules`: tsc, eslint e vitest non partono, e la sessione
+ * perde il primo quarto d'ora a capirlo (komalead, ≥3 sessioni fino al 03/10/2026). Si collega
+ * quello del checkout principale con un symlink: un `npm ci` per worktree costa 0,4–1,1 GB, e
+ * il 02/10 il disco era pieno di worktree. Stessa logica di `saio vagone` (saio-treno.py).
+ */
+export async function linkNodeModules(
+  repoDir: string,
+  wtPath: string,
+  warnings: string[],
+  run: GitRunner = git,
+  owner?: { uid: number; gid: number },
+): Promise<void> {
+  try {
+    const dest = path.join(wtPath, 'node_modules')
+    if (!fs.existsSync(path.join(wtPath, 'package.json'))) return
+    // lstat: anche un symlink rotto conta come «c'è già», non lo si sovrascrive.
+    const gia = await fsp.lstat(dest).then(() => true, () => false)
+    if (gia) return
+    const src = path.join(repoDir, 'node_modules')
+    if (!fs.existsSync(src)) {
+      warnings.push(`node_modules assente anche in ${repoDir}: serve \`npm ci\` nel worktree`)
+      return
+    }
+    await fsp.symlink(src, dest)
+    if (owner) await fsp.lchown(dest, owner.uid, owner.gid).catch(() => {})
+    // `node_modules/` con la barra finale non copre un symlink: git lo vedrebbe come file
+    // nuovo, e la pulizia dei worktree terrebbe la cartella per sempre come «sporca».
+    const ignorato = await run(wtPath, ['check-ignore', '-q', 'node_modules']).then(() => true, () => false)
+    if (!ignorato) {
+      const comune = await run(wtPath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+      const escl = path.join(comune, 'info', 'exclude')
+      await fsp.mkdir(path.dirname(escl), { recursive: true })
+      await fsp.appendFile(escl, '\n/node_modules\n')
+    }
+    logger.info(`[worktree] ${path.basename(wtPath)}: node_modules collegato a ${src}`)
+  } catch (err) {
+    warnings.push(`node_modules non collegato: ${String(err).slice(0, 160)}`)
+  }
 }
 
 /**
