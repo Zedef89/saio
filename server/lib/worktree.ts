@@ -32,6 +32,126 @@ export type GitRunner = (dir: string, args: string[]) => Promise<string>
 /** Radice dei worktree: fuori dai repo, così non finiscono mai in un `git status`. */
 export const WORKTREES_ROOT = path.join(os.homedir(), 'dev', '.worktrees')
 
+// ─────────────────── Disco dei worktree nuovi ───────────────────
+//
+// Dal 04/10/2026 i worktree NUOVI nascono sul volume esterno, non su `/`: il disco principale
+// era a 57 GB liberi su 225 (il 02/10 si era riempito del tutto), il volume Hetzner era vuoto.
+//
+// La regola è uno SPECCHIO: `<radice classica>/<repo>/<nome>` diventa
+// `<disco><radice classica>/<repo>/<nome>`, cioè
+//   /root/dev/.worktrees/komalead/x            → /mnt/HC_Volume_106968689/root/dev/.worktrees/komalead/x
+//   /srv/taskless/marco/dev/.worktrees/komalead/y → /mnt/HC_Volume_106968689/srv/taskless/marco/dev/.worktrees/komalead/y
+// Percorso vero, non un symlink: git, `/proc/<pid>/cwd`, `pane_current_path` e la cartella dei
+// transcript di Claude risolvono il percorso reale, e una cartella con due nomi avrebbe fatto
+// sparire le sessioni vive agli occhi di pulisci-worktree (che le riconosce dalla cwd). Il pezzo
+// `/dev/.worktrees/<repo>/<nome>` resta, e su quello contano la pulizia e la lista sessioni.
+//
+// I worktree che esistono restano dove sono. Se il volume non è montato (fstab ha `nofail`) si
+// torna alla radice classica con un avviso: scrivere in /mnt/HC_… non montato vorrebbe dire
+// riempire `/` e poi vedersi coprire i worktree dal mount.
+//
+// Gemello: devbox-config/bin/saio_worktree_radice.py (saio vagone, pulisci-worktree). Stessa
+// variabile `SAIO_WORKTREES_DISCO` (vuota o `0` = spento), stesso default, stessa regola.
+
+const DISCO_DEFAULT = '/mnt/HC_Volume_106968689'
+
+function discoWorktree(): string {
+  const d = (process.env.SAIO_WORKTREES_DISCO ?? DISCO_DEFAULT).trim()
+  return d === '' || d === '0' ? '' : d.replace(/\/+$/, '')
+}
+
+/** Mount point vero: device diverso dalla cartella sopra. Una cartella vuota su `/` no. */
+function discoMontato(d: string): boolean {
+  try {
+    return fs.statSync(d).dev !== fs.statSync(path.dirname(d)).dev
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Crea lo specchio di `classica` sul disco cartella per cartella, con proprietario, permessi e
+ * ACL dell'originale: l'area di una persona resta sua e chiusa agli altri anche sul volume,
+ * `/root` resta `/root` (con l'ACL di Marco). Le cartelle originali che ancora non esistono (la
+ * `.worktrees` di una persona appena arrivata) prendono quelli della prima che c'è sopra.
+ */
+async function preparaSpecchio(d: string, classica: string): Promise<void> {
+  const parti = path.resolve(classica).split(path.sep).filter(Boolean)
+  let origine = '/'
+  for (let i = 1; i <= parti.length; i++) {
+    const orig = '/' + parti.slice(0, i).join('/')
+    if (fs.existsSync(orig)) origine = orig
+    const sp = d + orig
+    if (fs.existsSync(sp)) continue
+    await fsp.mkdir(sp)
+    const st = await fsp.stat(origine)
+    await fsp.chown(sp, st.uid, st.gid)
+    await fsp.chmod(sp, st.mode & 0o7777)
+    try {
+      const { stdout } = await exec('getfacl', ['--omit-header', '--absolute-names', origine])
+      if (stdout.trim()) {
+        const child = execFile('setfacl', ['--set-file=-', sp])
+        child.stdin?.end(stdout)
+        await new Promise((r) => child.on('close', r))
+      }
+    } catch {
+      /* niente ACL da copiare, o setfacl assente: restano proprietario e permessi */
+    }
+  }
+}
+
+/**
+ * Dove far nascere i worktree NUOVI che classicamente nascerebbero in `classica`: lo specchio
+ * sul disco esterno, o `classica` stessa (con un avviso) se il disco non c'è o non si scrive.
+ */
+export async function radiceNuovi(classica: string): Promise<{ root: string; warning?: string }> {
+  const d = discoWorktree()
+  if (!d) return { root: classica }
+  if (!discoMontato(d)) {
+    return { root: classica, warning: `disco esterno ${d} non montato: il worktree nasce sul disco principale (${classica})` }
+  }
+  const dest = d + path.resolve(classica)
+  try {
+    if (!fs.existsSync(dest)) await preparaSpecchio(d, classica)
+    return { root: dest }
+  } catch (err) {
+    return {
+      root: classica,
+      warning: `non riesco a preparare ${dest} (${String(err).slice(0, 120)}): il worktree nasce sul disco principale`,
+    }
+  }
+}
+
+/**
+ * C'è una conversazione di Claude salvata per questa cartella? Claude la tiene in
+ * `<config>/projects/<cwd codificata>/`, e SAIO riprende con `--continue` solo se la trova lì.
+ * Un worktree tolto dalla pulizia e riaperto dalla stessa sessione deve rinascere nello STESSO
+ * percorso, o la conversazione resta orfana: per quelli nati sul disco principale si torna lì.
+ */
+function haConversazione(cartella: string): boolean {
+  const cod = cartella.replace(/[^A-Za-z0-9]/g, '-')
+  const basi = [os.homedir(), '/srv/taskless/account-claude']
+  try {
+    for (const e of fs.readdirSync('/srv/taskless', { withFileTypes: true })) {
+      if (e.isDirectory()) basi.push(path.join('/srv/taskless', e.name))
+    }
+  } catch {
+    /* niente aree persona */
+  }
+  for (const b of basi) {
+    let voci: string[] = []
+    try {
+      voci = fs.readdirSync(b).filter((n) => n === '.claude' || /^\.claude-[a-z]$/.test(n))
+    } catch {
+      continue
+    }
+    for (const c of voci) {
+      if (fs.existsSync(path.join(b, c, 'projects', cod))) return true
+    }
+  }
+  return false
+}
+
 /**
  * Branch da cui staccare, in ordine di preferenza.
  *
@@ -360,12 +480,26 @@ export async function ensureWorktree(
   const project = path.basename(repoDir)
   const label = opts.label || 'work'
   const dirName = worktreeDirName(identity.slug, label)
-  const wtPath = path.join(opts.root || WORKTREES_ROOT, project, dirName)
+  const radiceClassica = opts.root || WORKTREES_ROOT
+  const pathClassico = path.join(radiceClassica, project, dirName)
   const branch = `${sanitizeBranchPart(identity.slug)}/${sanitizeBranchPart(label)}`
   const warnings: string[] = []
 
+  // Dove nasce se è nuovo: sul disco esterno (vedi `radiceNuovi`), salvo che sul disco
+  // principale ci sia già la sua conversazione — allora rinasce lì e `--continue` la ritrova.
+  const nuova = await radiceNuovi(radiceClassica)
+  const pathDisco = path.join(nuova.root, project, dirName)
+  const esiste = async (p: string) => fs.existsSync(p) && (await isGitRepo(p))
+  const wtPath = (await esiste(pathClassico))
+    ? pathClassico
+    : (await esiste(pathDisco))
+      ? pathDisco
+      : pathDisco !== pathClassico && haConversazione(pathClassico)
+        ? pathClassico
+        : pathDisco
+
   // Già presente e sano → riuso.
-  if (fs.existsSync(wtPath) && (await isGitRepo(wtPath))) {
+  if (await esiste(wtPath)) {
     await applyIdentity(wtPath, identity, warnings, g)
     await linkNodeModules(repoDir, wtPath, warnings, g, opts.owner)
     const cur = await g(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
@@ -382,6 +516,10 @@ export async function ensureWorktree(
     return { path: wtPath, branch: cur, created: false, warnings, base: riferimento, behind }
   }
 
+  if (nuova.warning && wtPath === pathClassico) {
+    warnings.push(nuova.warning)
+    logger.warn(`[worktree] ${project}: ${nuova.warning}`)
+  }
   const base = opts.baseBranch || (await resolveBaseBranch(repoDir, { fetch: true, run: opts.run }))
   // Le cartelle intermedie le crea il processo (root): se il worktree sara' di un'altra
   // persona vanno intestate a lei, o `git worktree add` eseguito come lei non potrebbe
