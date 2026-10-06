@@ -61,7 +61,7 @@ interface PwInstance {
   cmd: string
 }
 
-async function fetchTmuxSessions(): Promise<{ sessions: TmuxSession[] }> {
+async function fetchTmuxSessions(): Promise<{ sessions: TmuxSession[]; me?: string | null }> {
   const res = await fetch('/api/system/tmux-sessions', { credentials: 'include' })
   if (!res.ok) return { sessions: [] }
   return res.json()
@@ -460,7 +460,12 @@ export function SessionsPage() {
   // Sessioni raggruppate per proprietario: su una macchina condivisa la lista piatta mescola
   // il lavoro di tutti. L'ordine tiene davanti chi guarda, poi gli altri per nome, e infine le
   // sessioni senza proprietario (aperte da SSH o create prima del prefisso).
-  const [closedGroups, setClosedGroups] = useState<Record<string, boolean>>({})
+  // Aperto di partenza c'e' solo il gruppo di chi guarda: con dieci persone sulla macchina,
+  // tutto espanso voleva dire chiudere nove gruppi a ogni visita. Se chi guarda non ha
+  // sessioni (o il server non sa chi e') si apre tutto, altrimenti la lista sembrerebbe vuota.
+  // `toggledGroups` tiene solo i clic, sopra a quel default.
+  const [toggledGroups, setToggledGroups] = useState<Record<string, boolean>>({})
+  const me = sessionsQuery.data?.me ?? null
   const groups = (() => {
     const map = new Map<string, { key: string; label: string; items: TmuxSession[] }>()
     for (const s of sessions) {
@@ -476,6 +481,9 @@ export function SessionsPage() {
       return a.label.localeCompare(b.label)
     })
   })()
+
+  const hoGruppo = !!me && groups.some((g) => g.key === me)
+  const isClosed = (key: string) => toggledGroups[key] ?? (hoGruppo && key !== me)
 
   const pw = pwQuery.data?.instances ?? []
   const pwCount = pw.length
@@ -543,14 +551,14 @@ export function SessionsPage() {
                 <p className="text-xs text-muted-foreground px-2 py-4 text-center">Nessuna sessione tmux attiva.</p>
               )}
               {groups.map((g) => {
-                const chiuso = !!closedGroups[g.key]
+                const chiuso = isClosed(g.key)
                 const attivi = g.items.filter((x) => x.activity === 'working').length
                 const inAttesa = g.items.filter((x) => x.activity === 'waiting').length
                 const fermi = g.items.filter((x) => x.account?.exhausted || x.limit).length
                 return (
                 <div key={g.key} className="mb-1">
                   <button
-                    onClick={() => setClosedGroups((p) => ({ ...p, [g.key]: !p[g.key] }))}
+                    onClick={() => setToggledGroups((p) => ({ ...p, [g.key]: !chiuso }))}
                     className="w-full flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
                   >
                     {chiuso ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}

@@ -266,7 +266,8 @@ export function systemRouter(): Router {
       // Le etichette delle sessioni chiuse non servono piu': qui e' l'unico punto che sa
       // quali esistono davvero. Non si aspetta e non puo' far fallire la lista.
       void pruneAliases(DATA_DIR(), sessions.map((s) => ({ name: s.name, created: s.created })))
-      res.json({ sessions: visibili })
+      // `me` serve alla pagina per aprire solo il gruppo di chi guarda.
+      res.json({ sessions: visibili, me: mio })
     } catch {
       // tmux assente o nessuna sessione: lista vuota, non è un errore
       res.json({ sessions: [] })
