@@ -313,8 +313,21 @@ export async function processTable(): Promise<ProcRow[]> {
   return rows
 }
 
-/** Il processo `claude` piu' vicino alla shell della pane (discesa a profondita' limitata). */
+/** Un comando che e' Claude Code: `node .../claude`, `claude`, `bun .../cli.js`. */
+const isClaude = (args: string) => /(^|\/|\s)claude(\s|$)|claude-code|\/claude\b/.test(args)
+
+/**
+ * Il processo `claude` della pane: la pane stessa, o il piu' vicino fra i discendenti
+ * (discesa a profondita' limitata).
+ */
 export function findClaudePid(rows: ProcRow[], panePid: number): number | null {
+  // Una sessione aperta con il comando in tmux (`new-session … claude`) o con `exec claude`
+  // non ha una shell sotto: claude E' la pane. Guardando solo i figli queste sessioni
+  // risultavano senza account, e la pagina Sessioni non offriva il cambio (06/10/2026).
+  // Non se la pane e' una shell (`bash -c "… claude …"`): li' claude e' un figlio, e lo trova la discesa.
+  const self = rows.find((r) => r.pid === panePid)
+  const shell = /^-?(?:\S*\/)?(?:ba|z|da|fi|k)?sh$/.test(self?.args.split(/\s+/)[0] ?? '')
+  if (self && !shell && isClaude(self.args)) return self.pid
   const byParent = new Map<number, ProcRow[]>()
   for (const r of rows) {
     const arr = byParent.get(r.ppid)
@@ -326,8 +339,7 @@ export function findClaudePid(rows: ProcRow[], panePid: number): number | null {
     const next: number[] = []
     for (const pid of frontier) {
       for (const child of byParent.get(pid) || []) {
-        // `node .../claude`, `claude`, `bun .../cli.js`: basta che il comando nomini claude.
-        if (/(^|\/|\s)claude(\s|$)|claude-code|\/claude\b/.test(child.args)) return child.pid
+        if (isClaude(child.args)) return child.pid
         next.push(child.pid)
       }
     }

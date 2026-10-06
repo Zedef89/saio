@@ -308,8 +308,26 @@ export async function switchSessionAccount(
   const videata = await readPaneText(session)
   const transcript = cwd ? await findTranscript(srcDir, cwd, startedMs, videata) : null
 
+  const { tmuxSuSessione: inviaA } = await import('./tmux-cmd')
+  const dd = process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+  // Claude E' la pane (sessione aperta con `exec claude` o col comando in tmux): quando esce,
+  // tmux chiude la pane e con lei la sessione, e il comando nuovo non avrebbe dove andare.
+  // La pane resta aperta da morta e si riapre con una shell: da li' riparte come le altre.
+  const claudeEPane = claudePid === panePid
+  if (claudeEPane) {
+    await inviaA(dd, session, ['set-option', '-p', '-t', `=${session}:`, 'remain-on-exit', 'on'])
+  }
+
   if (!(await stopClaude(session, claudePid))) {
+    if (claudeEPane) await inviaA(dd, session, ['set-option', '-p', '-u', '-t', `=${session}:`, 'remain-on-exit']).catch(() => {})
     return { ok: false, code: 'stop_failed', message: 'Claude non si e\' fermato: chiudilo a mano nella pane e riprova' }
+  }
+
+  if (claudeEPane) {
+    // Il comando va dato: senza, respawn-pane rilancerebbe quello originale, cioe' di nuovo claude.
+    const shell = (await inviaA(dd, session, ['show-options', '-gv', 'default-shell']).catch(() => null))?.stdout.trim() || '/bin/bash'
+    await inviaA(dd, session, ['respawn-pane', '-t', `=${session}:`, ...(cwd ? ['-c', cwd] : []), shell])
+    await inviaA(dd, session, ['set-option', '-p', '-u', '-t', `=${session}:`, 'remain-on-exit']).catch(() => {})
   }
 
   // Spostamento del transcript: prima la copia nella destinazione, poi l'originale viene
@@ -347,8 +365,7 @@ export async function switchSessionAccount(
     ),
     identityFile,
   )
-  const { tmuxSuSessione: inviaA } = await import('./tmux-cmd')
-  await inviaA(process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'), session, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'])
+  await inviaA(dd, session, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'])
   logger.info(`[switch-account] ${session}: ${fromSlot} → ${targetAccountId}${transcript ? ` (resume ${transcript})` : ' (chat nuova)'}`)
 
   return { ok: true, session, from: fromSlot, to: targetAccountId, transcript, cwd }
