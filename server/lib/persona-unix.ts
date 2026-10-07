@@ -180,12 +180,21 @@ export function envPerPersona(base: NodeJS.ProcessEnv, p: PersonaUnix): NodeJS.P
  *
  * `--init-groups` prende i gruppi supplementari da `/etc/group`: senza, la persona resterebbe
  * fuori dal gruppo `taskless` e non scriverebbe nella sua area.
+ *
+ * L'ambiente passa da `envPerPersona`, come per il PTY: il figlio eredita quello di SAIO, e
+ * se il comando e' il `tmux new-session` che fa NASCERE il server tmux della persona, quel
+ * server si tiene `DASHBOARD_DATA_DIR=/root/…` e lo consegna a ogni sessione aperta dopo —
+ * «registro assente» su `saio-accessi` per giorni, finche' il server non muore (02-07/10/2026:
+ * flavio, simone, antonio).
  */
 export function comeLaPersona(p: PersonaUnix | null, argv: string[]): { file: string; args: string[] } {
   if (!p) return { file: argv[0], args: argv.slice(1) }
+  const suo = envPerPersona(process.env, p)
+  const tolte = Object.keys(process.env).filter((k) => suo[k] === undefined).flatMap((k) => ['-u', k])
+  const cambiate = Object.entries(suo).filter(([k, v]) => v !== undefined && v !== process.env[k]).map(([k, v]) => `${k}=${v}`)
   return {
     file: 'setpriv',
-    args: ['--reuid', String(p.uid), '--regid', String(p.gid), '--init-groups', '--', 'env', `HOME=${p.home}`, `USER=${p.user}`, `LOGNAME=${p.user}`, ...argv],
+    args: ['--reuid', String(p.uid), '--regid', String(p.gid), '--init-groups', '--', 'env', ...tolte, ...cambiate, ...argv],
   }
 }
 
