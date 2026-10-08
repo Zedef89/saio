@@ -839,7 +839,7 @@ export function SessionsPage() {
 
       {/* ---------- NUOVA SESSIONE ---------- */}
       <Dialog open={showNew} onOpenChange={setShowNew}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-h-[90dvh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Nuova sessione tmux</DialogTitle>
             <DialogDescription>
@@ -847,7 +847,8 @@ export function SessionsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2">
+          {/* Con tanti account la lista supera lo schermo: scorre il corpo, Crea resta in vista. */}
+          <div className="space-y-4 py-2 min-h-0 overflow-y-auto -mx-1 px-1">
             <div className="space-y-1.5">
               <Label htmlFor="new-session-project" className="text-xs">Progetto</Label>
               <select
@@ -982,7 +983,7 @@ export function SessionsPage() {
       {/* Cambio account a sessione aperta: la conversazione si sposta con lei, quindi si
           riprende da dove era invece di ricominciare su un account con token liberi. */}
       <Dialog open={switchFor !== null} onOpenChange={(o) => { if (!o) { setSwitchFor(null); setSwitchBusy(null) } }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-h-[90dvh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Cambia account</DialogTitle>
             <DialogDescription>
@@ -991,7 +992,7 @@ export function SessionsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 min-h-0 overflow-y-auto -mx-1 px-1">
             {accountsQuery.isLoading && <p className="text-[10px] text-muted-foreground">Leggo le finestre token…</p>}
             {accounts.map((a) => {
               const current = sessions.find((x) => x.name === switchFor)?.account?.id === a.id
