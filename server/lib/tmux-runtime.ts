@@ -384,8 +384,14 @@ function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAcc
     }
   // >=100% e' il caso in cui la sessione risponderebbe solo "You've hit your limit". Vale per
   // TUTTE e due le finestre: quella delle 5 ore si riempie per prima e blocca allo stesso modo.
-  const settimanaPiena = (acc.usage?.weeklyPercent ?? 0) >= 100
-  const cinqueOrePiene = (acc.usage?.sessionPercent ?? 0) >= 100
+  //
+  // Ma solo finche' la finestra non si e' resettata: dopo un 429 si serve l'ultima lettura
+  // salvata (fino a 6 ore), e un "100% delle 5 ore" di due ore fa marchiava "limite finito"
+  // sessioni gia' ripartite — Nicola, 08/10/2026: "dice che e' finito pero' continua a funzionare".
+  const ancoraChiusa = (percent: number | null | undefined, resetsAt: string | null | undefined) =>
+    (percent ?? 0) >= 100 && !(resetsAt && Date.parse(resetsAt) <= Date.now())
+  const settimanaPiena = ancoraChiusa(acc.usage?.weeklyPercent, acc.usage?.weeklyResetsAt)
+  const cinqueOrePiene = ancoraChiusa(acc.usage?.sessionPercent, acc.usage?.sessionResetsAt)
   return {
     id: acc.id,
     label: acc.label,

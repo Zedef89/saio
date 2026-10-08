@@ -672,8 +672,12 @@ export function SessionsPage() {
                             </span>
                           )}
                           {exhausted && (
+                            /* Quale finestra e quando riparte, scritto sul badge: un "limite finito" secco
+                               si legge come "account morto per la settimana", e chi vede un blocco di
+                               due ore abbandona sessioni che a mezzanotte ripartono. */
                             <span className="flex items-center gap-0.5 text-red-400" title={resetLabel(s.account?.resetsAt ?? null)}>
-                              <Ban className="w-2.5 h-2.5" /> limite finito
+                              <Ban className="w-2.5 h-2.5" /> limite {s.account?.exhaustedWindow ?? 'settimana'}
+                              {s.account?.resetsAt && ` · ${resetLabel(s.account.resetsAt).replace(/^reset/, 'riparte')}`}
                             </span>
                           )}
                           {s.limit && !exhausted && (
