@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import os from 'node:os'
 import { TMUX_BIN } from './tmux-bin'
 import { listClaudeAccounts, type ClaudeAccount } from './claude-accounts'
 import { logger } from './logger'
@@ -376,7 +377,86 @@ export function slotFromConfigDir(configDir: string | null): string {
   return m ? m[1] : 'default'
 }
 
-function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAccountInfo | null {
+/**
+ * Quanto vale una risposta riuscita come prova che l'account non e' fermo: dopo, si torna a
+ * credere alla percentuale.
+ */
+const PROVA_RISPOSTA_MS = 10 * 60_000
+const ultimaRispostaCache = new Map<string, { at: number; value: number | null }>()
+
+/**
+ * Quando l'account ha risposto l'ultima volta senza errore, letto dai transcript piu' recenti
+ * della sua config dir. `null` se l'ultima risposta e' un errore (il "You've hit your limit" e'
+ * un messaggio assistant con `isApiErrorMessage`) o se non si legge niente.
+ *
+ * Serve perche' il 100% dell'endpoint usage non e' il blocco: Nicola, 09/10/2026, "mi dice
+ * limite 5 ore finito ma poi scrive" — `amministrazione` al 100% delle 5 ore e quattro sessioni
+ * che rispondevano normalmente un minuto dopo la lettura.
+ */
+async function ultimaRispostaRiuscita(configDir: string): Promise<number | null> {
+  const cached = ultimaRispostaCache.get(configDir)
+  if (cached && Date.now() - cached.at < 30_000) return cached.value
+  let value: number | null = null
+  try {
+    const root = path.join(configDir, 'projects')
+    const files: Array<{ file: string; mtime: number }> = []
+    for (const dir of await fs.readdir(root)) {
+      let names: string[]
+      try {
+        names = await fs.readdir(path.join(root, dir))
+      } catch {
+        continue
+      }
+      for (const n of names) {
+        if (!n.endsWith('.jsonl')) continue
+        const file = path.join(root, dir, n)
+        try {
+          const st = await fs.stat(file)
+          if (Date.now() - st.mtimeMs < PROVA_RISPOSTA_MS) files.push({ file, mtime: st.mtimeMs })
+        } catch {
+          /* file sparito nel frattempo */
+        }
+      }
+    }
+    // L'ultima parola dell'account e' l'assistant piu' recente fra i transcript toccati da poco:
+    // se e' un errore di limite l'account e' fermo davvero, se e' una risposta non lo e'.
+    let newest: { ts: number; ok: boolean } | null = null
+    for (const { file } of files.sort((a, b) => b.mtime - a.mtime).slice(0, 5)) {
+      const fh = await fs.open(file, 'r')
+      try {
+        const { size } = await fh.stat()
+        const len = Math.min(size, 256 * 1024)
+        const buf = Buffer.alloc(len)
+        await fh.read(buf, 0, len, size - len)
+        const righe = buf.toString('utf8').split('\n').reverse()
+        for (const riga of righe) {
+          if (!riga.includes('"type":"assistant"')) continue
+          try {
+            const j = JSON.parse(riga) as { timestamp?: string; isApiErrorMessage?: boolean }
+            const ts = Date.parse(j.timestamp ?? '')
+            if (Number.isFinite(ts) && (!newest || ts > newest.ts)) newest = { ts, ok: !j.isApiErrorMessage }
+            break
+          } catch {
+            /* riga tagliata dall'inizio del buffer */
+          }
+        }
+      } finally {
+        await fh.close()
+      }
+    }
+    value = newest?.ok ? newest.ts : null
+  } catch {
+    value = null
+  }
+  ultimaRispostaCache.set(configDir, { at: Date.now(), value })
+  return value
+}
+
+function toAccountInfo(
+  acc: ClaudeAccount | undefined,
+  slot: string,
+  rispostaRiuscita: number | null = null
+): SessionAccountInfo | null {
   if (!acc)
     return {
       id: slot, label: slot, email: null, weeklyPercent: null, sessionPercent: null,
@@ -388,8 +468,12 @@ function toAccountInfo(acc: ClaudeAccount | undefined, slot: string): SessionAcc
   // Ma solo finche' la finestra non si e' resettata: dopo un 429 si serve l'ultima lettura
   // salvata (fino a 6 ore), e un "100% delle 5 ore" di due ore fa marchiava "limite finito"
   // sessioni gia' ripartite — Nicola, 08/10/2026: "dice che e' finito pero' continua a funzionare".
+  //
+  // E solo finche' l'account non risponde: il 100% dell'endpoint usage non coincide col blocco,
+  // e una risposta riuscita negli ultimi minuti smentisce la percentuale.
+  const rispondeAncora = rispostaRiuscita != null && Date.now() - rispostaRiuscita < PROVA_RISPOSTA_MS
   const ancoraChiusa = (percent: number | null | undefined, resetsAt: string | null | undefined) =>
-    (percent ?? 0) >= 100 && !(resetsAt && Date.parse(resetsAt) <= Date.now())
+    !rispondeAncora && (percent ?? 0) >= 100 && !(resetsAt && Date.parse(resetsAt) <= Date.now())
   const settimanaPiena = ancoraChiusa(acc.usage?.weeklyPercent, acc.usage?.weeklyResetsAt)
   const cinqueOrePiene = ancoraChiusa(acc.usage?.sessionPercent, acc.usage?.sessionResetsAt)
   return {
@@ -460,8 +544,13 @@ export async function sessionRuntimes(dataDir = DATA_DIR()): Promise<Record<stri
         const claudePid = findClaudePid(rows, pane.pid)
         let account: SessionAccountInfo | null = null
         if (claudePid) {
-          const slot = slotFromConfigDir(await readConfigDir(claudePid))
-          account = toAccountInfo(byId.get(slot), slot)
+          const configDir = await readConfigDir(claudePid)
+          const slot = slotFromConfigDir(configDir)
+          const acc = byId.get(slot)
+          // Il transcript si guarda solo quando la percentuale direbbe "fermo": e' l'unico caso in cui serve.
+          const piena = (acc?.usage?.sessionPercent ?? 0) >= 100 || (acc?.usage?.weeklyPercent ?? 0) >= 100
+          const riuscita = piena ? await ultimaRispostaRiuscita(configDir ?? path.join(os.homedir(), '.claude')) : null
+          account = toAccountInfo(acc, slot, riuscita)
         }
         const screen = claudePid ? await readScreen(pane.name) : null
         out[pane.name] = { account, activity: screen?.activity ?? 'shell', limit: screen?.limit ?? null }
