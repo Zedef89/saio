@@ -13,13 +13,26 @@ import os from 'node:os'
  */
 export async function atomicWriteFile(
   targetPath: string,
-  content: string | Buffer
+  content: string | Buffer,
+  opts: { mode?: number } = {}
 ): Promise<void> {
   const dir = path.dirname(targetPath)
   const base = path.basename(targetPath)
   const tmpPath = path.join(dir, `.${base}.${process.pid}.${Date.now()}.tmp`)
+  // Il rename sostituisce il file: senza questo il file nuovo nasce coi permessi di
+  // default (644) anche se quello vecchio era stato stretto a 600 a mano.
+  // Senza `mode` si tengono i permessi del file che c'era.
+  let mode = opts.mode
+  if (mode === undefined) {
+    try {
+      mode = (await fs.stat(targetPath)).mode & 0o777
+    } catch {
+      /* file nuovo: permessi di default */
+    }
+  }
   try {
-    await fs.writeFile(tmpPath, content)
+    await fs.writeFile(tmpPath, content, mode !== undefined ? { mode } : undefined)
+    if (mode !== undefined) await fs.chmod(tmpPath, mode)
     await renameWithRetry(tmpPath, targetPath)
   } catch (err) {
     try {

@@ -54,7 +54,7 @@ async function readStore(dataDir: string): Promise<PendingStore> {
 async function writeStore(dataDir: string, store: PendingStore): Promise<void> {
   const file = authPath(dataDir, 'pendingMagicLinks')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 /**

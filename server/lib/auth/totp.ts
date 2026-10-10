@@ -59,7 +59,7 @@ async function readTotpStore(dataDir: string): Promise<TotpStore> {
 async function writeTotpStore(dataDir: string, store: TotpStore): Promise<void> {
   const file = authPath(dataDir, 'totpSecrets')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 async function readRecoveryStore(dataDir: string): Promise<RecoveryStore> {
@@ -77,7 +77,7 @@ async function readRecoveryStore(dataDir: string): Promise<RecoveryStore> {
 async function writeRecoveryStore(dataDir: string, store: RecoveryStore): Promise<void> {
   const file = authPath(dataDir, 'recoveryCodes')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 function generateRecoveryCodes(count: number): string[] {

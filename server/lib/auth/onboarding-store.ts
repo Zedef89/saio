@@ -41,7 +41,7 @@ export async function readOnboardingState(dataDir: string): Promise<OnboardingSt
 export async function writeOnboardingState(dataDir: string, state: OnboardingState): Promise<void> {
   const file = filePath(dataDir)
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(state, null, 2))
+  await atomicWriteFile(file, JSON.stringify(state, null, 2), { mode: 0o600 })
 }
 
 export async function patchChoices(

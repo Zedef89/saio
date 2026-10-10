@@ -51,7 +51,7 @@ async function writeStore(store: BanStore): Promise<void> {
   if (!cachedDataDir) return
   const file = authPath(cachedDataDir, 'bannedIps')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 /** Returns true se l'IP è bannato e il ban è ancora attivo. */

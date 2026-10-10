@@ -98,7 +98,7 @@ export async function updateEnvLocal(
   }
 
   await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await atomicWriteFile(filePath, lines.join('\n'))
+  await atomicWriteFile(filePath, lines.join('\n'), { mode: 0o600 })
   logger.info(`[env-writer] updated ${path.basename(filePath)} with ${Object.keys(updates).length} keys`)
   return { path: filePath, backup: backupPath }
 }

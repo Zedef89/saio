@@ -32,7 +32,7 @@ export async function getJwtSecret(dataDir: string): Promise<string> {
   }
   const newSecret = crypto.randomBytes(32).toString('hex')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, newSecret)
+  await atomicWriteFile(file, newSecret, { mode: 0o600 })
   // Best-effort permissions tightening on POSIX
   if (process.platform !== 'win32') {
     try {

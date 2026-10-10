@@ -69,7 +69,7 @@ export async function audit(event: Omit<AuditEvent, 'ts'>): Promise<void> {
   try {
     // Ensure dir esiste (defensive — datadirs.ts dovrebbe averla creata)
     await fs.mkdir(path.dirname(file), { recursive: true })
-    await fs.appendFile(file, JSON.stringify(full) + '\n', 'utf-8')
+    await fs.appendFile(file, JSON.stringify(full) + '\n', { encoding: 'utf-8', mode: 0o600 })
   } catch (err) {
     logger.error('[audit] write failed', err, full)
   }

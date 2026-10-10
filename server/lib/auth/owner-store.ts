@@ -29,7 +29,7 @@ export async function readOwner(dataDir: string): Promise<Owner | null> {
 export async function writeOwner(dataDir: string, owner: Owner): Promise<void> {
   const file = authPath(dataDir, 'ownerJson')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(owner, null, 2))
+  await atomicWriteFile(file, JSON.stringify(owner, null, 2), { mode: 0o600 })
 }
 
 export async function isClaimed(dataDir: string): Promise<boolean> {

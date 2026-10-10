@@ -34,7 +34,7 @@ async function readClaimState(dataDir: string): Promise<ClaimState | null> {
 export async function writeClaimState(dataDir: string, state: ClaimState): Promise<void> {
   const file = authPath(dataDir, 'claimState')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(state, null, 2))
+  await atomicWriteFile(file, JSON.stringify(state, null, 2), { mode: 0o600 })
 }
 
 async function fileExists(p: string): Promise<boolean> {
@@ -113,7 +113,7 @@ export async function bootstrapAuth(dataDir: string): Promise<void> {
   await writeClaimState(dataDir, state)
   const txtPath = authPath(dataDir, 'claimTokenTxt')
   await fs.mkdir(path.dirname(txtPath), { recursive: true })
-  await atomicWriteFile(txtPath, raw)
+  await atomicWriteFile(txtPath, raw, { mode: 0o600 })
   if (process.platform !== 'win32') {
     try {
       await fs.chmod(txtPath, 0o600)

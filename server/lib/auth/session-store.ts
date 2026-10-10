@@ -68,7 +68,7 @@ async function readSessions(dataDir: string): Promise<SessionStore> {
 async function writeSessions(dataDir: string, store: SessionStore): Promise<void> {
   const file = authPath(dataDir, 'sessions')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 async function readRevoked(dataDir: string): Promise<RevokedStore> {
@@ -86,7 +86,7 @@ async function readRevoked(dataDir: string): Promise<RevokedStore> {
 async function writeRevoked(dataDir: string, store: RevokedStore): Promise<void> {
   const file = authPath(dataDir, 'revokedTokens')
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await atomicWriteFile(file, JSON.stringify(store, null, 2))
+  await atomicWriteFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 function gcSessions(store: SessionStore): SessionStore {
