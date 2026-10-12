@@ -217,7 +217,7 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
   )
 }
 
-async function createTmuxSession(body: { name: string; projectId: string | null; startClaude: boolean; account: string | null }) {
+async function createTmuxSession(body: { name: string; projectId: string | null; startClaude: boolean; account: string | null; cli: 'claude' | 'codex' }) {
   const res = await fetch('/api/system/tmux-sessions', {
     method: 'POST',
     credentials: 'include',
@@ -274,6 +274,7 @@ export function SessionsPage() {
   const [newProjectId, setNewProjectId] = useState<string>('')
   const [newName, setNewName] = useState('')
   const [newStartClaude, setNewStartClaude] = useState(true)
+  const [newCli, setNewCli] = useState<'claude' | 'codex'>('claude')
   // null = non ancora scelto: alla prima risposta si preseleziona l'account più libero.
   const [newAccount, setNewAccount] = useState<string | null>(null)
   const queryClient = useQueryClient()
@@ -887,7 +888,8 @@ export function SessionsPage() {
                       name: newName,
                       projectId: newProjectId || null,
                       startClaude: newStartClaude,
-                      account: newStartClaude ? pickedAccount : null,
+                      cli: newCli,
+                      account: newStartClaude && newCli === 'claude' ? pickedAccount : null,
                     })
                   }
                 }}
@@ -899,6 +901,19 @@ export function SessionsPage() {
               )}
             </div>
 
+            <div className="space-y-1.5">
+              <Label htmlFor="new-session-cli" className="text-xs">CLI</Label>
+              <select
+                id="new-session-cli"
+                value={newCli}
+                onChange={(e) => setNewCli(e.target.value === 'codex' ? 'codex' : 'claude')}
+                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+              </select>
+            </div>
+
             <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -906,11 +921,11 @@ export function SessionsPage() {
                 onChange={(e) => setNewStartClaude(e.target.checked)}
                 className="h-3.5 w-3.5 accent-primary"
               />
-              Avvia <span className="font-mono">claude</span> all'apertura
+              Avvia <span className="font-mono">{newCli}</span> all'apertura
             </label>
 
             {/* Quale abbonamento usare: preselezionato quello con la settimana più libera. */}
-            {newStartClaude && (
+            {newStartClaude && newCli === 'claude' && (
               <div className="space-y-1.5 pl-5">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs">Account</Label>
@@ -973,7 +988,8 @@ export function SessionsPage() {
                   name: newName,
                   projectId: newProjectId || null,
                   startClaude: newStartClaude,
-                  account: newStartClaude ? pickedAccount : null,
+                  cli: newCli,
+                  account: newStartClaude && newCli === 'claude' ? pickedAccount : null,
                 })
               }
             >

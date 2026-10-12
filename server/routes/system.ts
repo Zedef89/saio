@@ -618,7 +618,7 @@ export function systemRouter(): Router {
   })
 
   // Crea una nuova sessione tmux dalla pagina Sessioni (senza passare dalla card progetto).
-  // body: { name, projectId?, startClaude?, account? }
+  // body: { name, projectId?, startClaude?, account?, cli? }
   //  - projectId → cwd = path del progetto (e il nome di default è quello del progetto)
   //  - senza projectId → sessione "libera" nella home
   //  - account → quale abbonamento Claude usare (vedi /claude-accounts); omesso = quello di default
@@ -627,6 +627,11 @@ export function systemRouter(): Router {
     const rawName = String(req.body?.name || '').trim()
     const projectId = req.body?.projectId ? String(req.body.projectId) : null
     const startClaude = req.body?.startClaude !== false
+    const cli = req.body?.cli === undefined ? 'claude' : req.body.cli
+    if (cli !== 'claude' && cli !== 'codex') {
+      res.status(400).json({ error: 'invalid_cli' })
+      return
+    }
     const accountId = req.body?.account ? String(req.body.account) : null
 
     if (!/^[a-zA-Z0-9._-]+$/.test(rawName)) {
@@ -646,16 +651,6 @@ export function systemRouter(): Router {
       const { promisify } = await import('node:util')
       const execFileAsync = promisify(execFile)
 
-      // Già viva? Non ricreare: il frontend ci si attacca e basta.
-      try {
-        const { tmuxSuSessione } = await import('../lib/tmux-cmd')
-        await tmuxSuSessione(DATA_DIR(), name, ['has-session', '-t', `=${name}`])
-        res.json({ ok: true, name, created: false, alreadyExisted: true })
-        return
-      } catch {
-        /* non esiste → si crea */
-      }
-
       // Chi ha un utente Unix suo apre la sessione COME quell'utente, e dentro la SUA area:
       // il progetto e' registrato col percorso di chi l'ha importato (`/root/dev/…`), che per
       // lei non e' nemmeno leggibile.
@@ -666,6 +661,22 @@ export function systemRouter(): Router {
       } catch (err) {
         res.status(500).json({ error: 'persona_non_risolta', message: (err as Error).message })
         return
+      }
+
+      // Codex e' configurato solo per root, non nelle aree Unix personali.
+      if (cli === 'codex' && persona) {
+        res.status(400).json({ error: 'codex_solo_root' })
+        return
+      }
+
+      // Già viva? Non ricreare: il frontend ci si attacca e basta.
+      try {
+        const { tmuxSuSessione } = await import('../lib/tmux-cmd')
+        await tmuxSuSessione(DATA_DIR(), name, ['has-session', '-t', `=${name}`])
+        res.json({ ok: true, name, created: false, alreadyExisted: true })
+        return
+      } catch {
+        /* non esiste → si crea */
       }
 
       // git eseguito come la persona della sessione (come root, se non ne ha una): vale sia per
@@ -760,45 +771,48 @@ export function systemRouter(): Router {
 
       // L'account arriva come id simbolico e viene risolto contro il registro:
       // nella riga di comando finisce solo una config dir nostra, mai input dell'utente.
-      let claudeCmd = 'claude'
+      let claudeCmd = cli === 'codex' ? 'codex' : 'claude'
       let accountLabel = 'default'
-      // 🔴 Per chi ha un utente Unix suo, l'account di default NON e' un caso da saltare.
-      // `claude` nudo legge `$HOME/.claude`, e la sua HOME e' `/home/<lei>`: li' non c'e'
-      // niente. La CLI parte dall'inizio e le chiede con quale piano vuole usare Claude —
-      // davanti a un abbonamento gia' pagato, e con il rischio che un login vero riscriva
-      // il `.credentials.json` che tutti e cinque gli account condividono. La config di
-      // default va detta esplicitamente, come le altre.
-      const accountRichiesto = accountId || (persona ? 'default' : null)
-      if (startClaude && accountRichiesto) {
-        const { configDirForAccount } = await import('../lib/claude-accounts')
-        const configDir = await configDirForAccount(accountRichiesto)
-        if (!configDir) {
-          res.status(400).json({ error: 'unknown_account', account: accountRichiesto })
-          return
-        }
-        if (persona || accountRichiesto !== 'default') {
-          // La config e' la SUA, non quella condivisa: vedi configPerPersona. E il file delle
-          // credenziali va riaperto adesso: la CLI lo richiude a ogni rinnovo del token.
-          if (persona) {
-            const { riapriTutteLeCredenziali } = await import('../lib/persona-unix')
-            await riapriTutteLeCredenziali()
+      // Codex parte nudo: account, permessi e nota d'identita' sono solo di Claude.
+      if (cli === 'claude') {
+        // 🔴 Per chi ha un utente Unix suo, l'account di default NON e' un caso da saltare.
+        // `claude` nudo legge `$HOME/.claude`, e la sua HOME e' `/home/<lei>`: li' non c'e'
+        // niente. La CLI parte dall'inizio e le chiede con quale piano vuole usare Claude —
+        // davanti a un abbonamento gia' pagato, e con il rischio che un login vero riscriva
+        // il `.credentials.json` che tutti e cinque gli account condividono. La config di
+        // default va detta esplicitamente, come le altre.
+        const accountRichiesto = accountId || (persona ? 'default' : null)
+        if (startClaude && accountRichiesto) {
+          const { configDirForAccount } = await import('../lib/claude-accounts')
+          const configDir = await configDirForAccount(accountRichiesto)
+          if (!configDir) {
+            res.status(400).json({ error: 'unknown_account', account: accountRichiesto })
+            return
           }
-          claudeCmd = `CLAUDE_CONFIG_DIR='${configPerPersona(persona, configDir)}' claude`
-          accountLabel = accountRichiesto
+          if (persona || accountRichiesto !== 'default') {
+            // La config e' la SUA, non quella condivisa: vedi configPerPersona. E il file delle
+            // credenziali va riaperto adesso: la CLI lo richiude a ogni rinnovo del token.
+            if (persona) {
+              const { riapriTutteLeCredenziali } = await import('../lib/persona-unix')
+              await riapriTutteLeCredenziali()
+            }
+            claudeCmd = `CLAUDE_CONFIG_DIR='${configPerPersona(persona, configDir)}' claude`
+            accountLabel = accountRichiesto
+          }
         }
-      }
 
-      // Stessa modalità permessi delle sessioni aperte dalle card progetto: senza questo
-      // le sessioni create da qui partirebbero col comportamento di default.
-      const { withPermissionMode, resolvePermissionMode } = await import('../lib/pty-manager')
-      claudeCmd = withPermissionMode(claudeCmd)
-      // Chi apre la sessione lo sa gia' SAIO (utente autenticato): va detto anche alla CLI,
-      // che altrimenti si presenta col titolare dell'abbonamento Anthropic.
-      const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
-      claudeCmd = withIdentityFile(
-        claudeCmd,
-        await writeIdentityFile(DATA_DIR(), requester, persona ? path.join(persona.area, '.saio') : undefined),
-      )
+        // Stessa modalità permessi delle sessioni aperte dalle card progetto: senza questo
+        // le sessioni create da qui partirebbero col comportamento di default.
+        const { withPermissionMode } = await import('../lib/pty-manager')
+        claudeCmd = withPermissionMode(claudeCmd)
+        // Chi apre la sessione lo sa gia' SAIO (utente autenticato): va detto anche alla CLI,
+        // che altrimenti si presenta col titolare dell'abbonamento Anthropic.
+        const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
+        claudeCmd = withIdentityFile(
+          claudeCmd,
+          await writeIdentityFile(DATA_DIR(), requester, persona ? path.join(persona.area, '.saio') : undefined),
+        )
+      }
 
       const nuova = comeLaPersona(persona, [TMUX_BIN, 'new-session', '-d', '-s', name, '-c', cwd])
       await execFileAsync(nuova.file, nuova.args)
@@ -806,16 +820,17 @@ export function systemRouter(): Router {
         const invio = comeLaPersona(persona, [TMUX_BIN, 'send-keys', '-t', name, claudeCmd, 'Enter'])
         await execFileAsync(invio.file, invio.args)
       }
-      if (startClaude) {
+      if (startClaude && cli === 'claude') {
+        const { resolvePermissionMode } = await import('../lib/pty-manager')
         logger.info(`[tmux] "${name}": claude con perm=${resolvePermissionMode()}`)
       }
 
-      logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? ` (+claude account=${accountLabel})` : ''}`)
+      logger.info(`[tmux] creata sessione "${name}" in ${cwd}${startClaude ? (cli === 'codex' ? ' (+codex)' : ` (+claude account=${accountLabel})`) : ''}`)
       // Una sessione = un terminale su questa macchina, root per chi non ha un utente suo:
       // e' l'azione piu' pesante che l'interfaccia permette, e va nell'audit anche quando va
       // tutto bene. `utente` dice con quale identita' e' partita davvero.
-      auditAction(req, 'tmux.created', { name, cwd, projectId, branch: worktree?.branch || null, utente: persona?.user || 'root', account: startClaude ? accountLabel : null })
-      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude, account: startClaude ? accountLabel : null, worktree })
+      auditAction(req, 'tmux.created', { name, cwd, projectId, branch: worktree?.branch || null, utente: persona?.user || 'root', cli, account: startClaude && cli === 'claude' ? accountLabel : null })
+      res.json({ ok: true, name, cwd, created: true, startedClaude: startClaude && cli === 'claude', cli, account: startClaude && cli === 'claude' ? accountLabel : null, worktree })
     } catch (err) {
       res.status(500).json({ error: 'create_failed', message: (err as Error).message })
     }
