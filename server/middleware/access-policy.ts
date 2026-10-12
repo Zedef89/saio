@@ -74,6 +74,10 @@ const OWNER_ONLY: Rule[] = [
 ]
 
 /**
+ * Dal 12/10/2026 la shell root (`terminal`, `shell-root`) e' del solo super admin, e nelle
+ * sessioni degli altri si entra in sola lettura, a prescindere da questo interruttore: la
+ * regola sta in lib/pty-access.ts.
+ *
  * Terminale ai guest. Acceso di default: senza PTY un invitato non puo' fare il lavoro per
  * cui lo si invita (aprire una sessione Claude e analizzare i dati). Si spegne con
  * `SAIO_GUEST_PTY=false` quando si vuole un ruolo di sola lettura vero — ed e' l'unico

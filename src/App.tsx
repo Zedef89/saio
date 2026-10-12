@@ -4,6 +4,8 @@ import { Layout } from '@/components/layout/Layout'
 import { InboxPage } from '@/pages/Inbox'
 import { TasksPage } from '@/pages/Tasks'
 import { SessionsPage } from '@/pages/Sessions'
+import { SessioneMadrePage } from '@/pages/SessioneMadre'
+import { ShellRootPage } from '@/pages/ShellRoot'
 import { ChatsPage } from '@/pages/Chats'
 import { MemoriesPage } from '@/pages/Memories'
 import { InfrastructurePage } from '@/pages/Infrastructure'
@@ -64,6 +66,8 @@ export default function App() {
           {/* Home = overview delle sessioni tmux attive (scelta di Nicola) */}
           <Route index element={<Navigate to="/sessions" replace />} />
           <Route path="sessions" element={<SessionsPage />} />
+          <Route path="sessione-madre" element={<SessioneMadrePage />} />
+          <Route path="shell-root" element={<ShellRootPage />} />
           <Route path="chats" element={<ChatsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="memories" element={<MemoriesPage />} />

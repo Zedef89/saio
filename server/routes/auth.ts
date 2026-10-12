@@ -716,16 +716,21 @@ export function authRouter(dataDir: string): Router {
   )
 
   // ─────────────────── ME (auth required) ───────────────────
-  router.get('/me', requireAuthMw, (req, res) => {
+  router.get('/me', requireAuthMw, async (req, res) => {
     if (!req.user) {
       res.status(401).json({ error: 'unauthenticated' })
       return
     }
+    // `superAdmin` (owner.json, oggi Nicola) e' diverso dal ruolo `owner` dell'allowlist: apre
+    // la shell root e scrive in tutte le sessioni. L'interfaccia lo usa per mostrare o no
+    // quei pulsanti; il permesso vero lo controllano il WebSocket e le route.
+    const { isSuperAdmin } = await import('../lib/session-owner')
     res.json({
       email: req.user.email,
       role: req.user.role,
       sid: req.user.sid,
       authBypass: !isAuthRequired(),
+      superAdmin: await isSuperAdmin(dataDir, req.user.email),
     })
   })
 

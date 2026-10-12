@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test server/lib/__tests__/*.test.ts",
     "orchestrator:dry": "python orchestrator/orchestrator.py --dry-run",
     "backup": "tsx scripts/cron-runner.ts vault-backup",
     "claim:reissue": "tsx scripts/claim-reissue.ts",

@@ -61,22 +61,46 @@ export async function withOwnerPrefix(name: string, dataDir: string, email: stri
 }
 
 /**
- * Se questo utente puo' agire (chiudere, cambiare account) su questa sessione.
+ * Chi e' il super admin: il proprietario dell'istanza, quello scritto in `auth/owner.json` al
+ * claim (oggi Nicola). Non e' il ruolo `owner` dell'allowlist: quello ce l'hanno in cinque
+ * (Alberto, Marco, Simone, Antonio...) e serve per le pagine di gestione, non per entrare nel
+ * lavoro degli altri.
  *
- * L'owner puo' su tutto: e' lui che tiene in piedi la macchina e deve poter chiudere una
- * sessione impazzita di chiunque. Un guest solo sulle proprie, riconosciute dal prefisso del
- * nome — che e' l'unico posto dove il proprietario e' scritto (vedi in testa a questo file).
+ * `dev@local` e' l'utente finto dei bypass (auth spenta, richiesta locale, cron): li' non
+ * c'e' nessuno da distinguere.
+ */
+export async function isSuperAdmin(dataDir: string, email: string | null | undefined): Promise<boolean> {
+  if (!email) return false
+  const norm = email.trim().toLowerCase()
+  if (norm === 'dev@local') return true
+  try {
+    const { readOwner } = await import('./auth/owner-store')
+    const owner = await readOwner(dataDir)
+    return !!owner && owner.email.trim().toLowerCase() === norm
+  } catch {
+    // Un owner.json illeggibile non promuove nessuno.
+    return false
+  }
+}
+
+/**
+ * Se questo utente puo' SCRIVERE in questa sessione: mandarle tasti, chiuderla, cambiarle
+ * account o etichetta. Guardarla possono tutti (Nicola, 12/10/2026: «vedere si', scrivere no»).
  *
- * Le sessioni senza prefisso conosciuto (aperte a mano da SSH) restano fuori portata dei
- * guest: se non si sa di chi sono, il default e' non toccarle.
+ * Il super admin su tutte: e' lui che tiene in piedi la macchina. Tutti gli altri — owner
+ * dell'allowlist compresi — solo sulle proprie, riconosciute dal prefisso del nome, che e'
+ * l'unico posto dove il proprietario e' scritto (vedi in testa a questo file).
+ *
+ * Le sessioni senza prefisso conosciuto (aperte a mano da SSH, `main`) restano del solo super
+ * admin: se non si sa di chi sono, il default e' non toccarle.
  */
 export async function canActOnSession(
   dataDir: string,
   sessionName: string,
-  user: { email: string; role: 'owner' | 'guest' } | undefined,
+  user: { email: string; role?: 'owner' | 'guest' } | undefined,
 ): Promise<boolean> {
-  if (!user) return false
-  if (user.role === 'owner') return true
+  if (!user?.email) return false
+  if (await isSuperAdmin(dataDir, user.email)) return true
   const owners = await knownOwners(dataDir)
   const owner = ownerFromName(sessionName, owners)
   if (!owner) return false

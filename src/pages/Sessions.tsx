@@ -49,6 +49,8 @@ interface TmuxSession {
   owner?: { slug: string; name: string } | null
   /** Etichetta scritta a mano quando il nome non racconta piu' il lavoro; il nome resta quello. */
   alias?: string | null
+  /** Se chi guarda ci puo' scrivere: le proprie si', quelle degli altri no (Nicola tutte). */
+  canWrite?: boolean
 }
 
 interface PwInstance {
@@ -700,6 +702,12 @@ export function SessionsPage() {
                           </Button>
                           <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]" onClick={() => setConfirmKill(null)}>No</Button>
                         </div>
+                      ) : s.canWrite === false ? (
+                        // Di un altro: si apre e si guarda, ma chiudere, rinominare e cambiare
+                        // account no — il server risponderebbe 403 (lib/pty-access.ts).
+                        <span className="shrink-0 text-[10px] text-muted-foreground" title="La vedi, ma ci scrive solo chi l'ha aperta">
+                          sola lettura
+                        </span>
                       ) : (
                         <div className="flex items-center gap-1 shrink-0 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
                           {/* Su touch non esiste l'hover: da telefono i bottoni restano visibili,

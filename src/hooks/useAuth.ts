@@ -5,6 +5,8 @@ export interface MeResponse {
   role: 'owner' | 'guest'
   sid: string
   authBypass: boolean
+  /** Il proprietario dell'istanza (owner.json, oggi Nicola): shell root e scrittura ovunque. */
+  superAdmin?: boolean
 }
 
 export const AUTH_ME_KEY = ['auth', 'me'] as const
@@ -44,6 +46,15 @@ export function useMe() {
 export function useIsOwner(): boolean {
   const { data } = useMe()
   return !!data && (data.role === 'owner' || data.authBypass)
+}
+
+/**
+ * Il super admin: diverso da `useIsOwner` (owner dell'allowlist, oggi in cinque). Solo lui
+ * apre la shell root e scrive nelle sessioni degli altri — il server lo controlla comunque.
+ */
+export function useIsSuperAdmin(): boolean {
+  const { data } = useMe()
+  return !!data && (!!data.superAdmin || data.authBypass)
 }
 
 export function useLogout() {

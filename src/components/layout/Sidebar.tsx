@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
-import { useMe, useIsOwner, useLogout } from '@/hooks/useAuth'
+import { useMe, useIsOwner, useIsSuperAdmin, useLogout } from '@/hooks/useAuth'
 import { LogOut, UserCog, Globe, ScanLine, ShieldCheck } from 'lucide-react'
 import { CloudflareSetupWizard } from '@/components/onboarding/CloudflareSetupWizard'
 import { AutoScanWizard } from '@/components/onboarding/AutoScanWizard'
@@ -24,6 +24,8 @@ import {
   Microscope,
   PanelLeftClose,
   PanelLeft,
+  Crown,
+  ShieldAlert,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SaioLogo } from '@/components/brand/SaioLogo'
@@ -75,6 +77,11 @@ async function fetchPtySessions(): Promise<{ sessions: PtySessionInfo[] }> {
 }
 
 const navItems = [
+  // In testa e in evidenza: la sessione di coordinamento di Nicola non si deve perdere fra le
+  // altre (Nicola, 12/10/2026). La vedono tutti; ci scrive solo lui (lib/pty-access.ts).
+  { to: '/sessione-madre', i18nKey: 'sidebar.sessione_madre', label: 'Sessione madre', icon: Crown, accent: true },
+  // La shell root: solo il super admin. Il server la rifiuta a tutti gli altri comunque.
+  { to: '/shell-root', i18nKey: 'sidebar.shell_root', label: 'Shell root', icon: ShieldAlert, superAdminOnly: true },
   // Overview di TUTTE le sessioni tmux attive (home di Nicola)
   { to: '/sessions', i18nKey: 'sidebar.sessions', label: 'Sessioni', icon: TerminalSquare },
   { to: '/chats', i18nKey: 'sidebar.chats', label: 'Storico chat', icon: MessagesSquare },
@@ -99,6 +106,7 @@ const COLLAPSE_KEY = 'saio-sidebar-collapsed'
 export function Sidebar() {
   const { t } = useTranslation('nav')
   const isOwner = useIsOwner()
+  const isSuperAdmin = useIsSuperAdmin()
   // V14.19 — collapsible desktop con persistenza localStorage
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -144,7 +152,11 @@ export function Sidebar() {
 
           {/* Nav items principali */}
           <nav className={cn('py-4 space-y-1 relative', collapsed ? 'px-2' : 'px-3')}>
-            {navItems.filter(item => isOwner || !('ownerOnly' in item && item.ownerOnly)).map(item => {
+            {navItems
+              .filter(item => isOwner || !('ownerOnly' in item && item.ownerOnly))
+              .filter(item => isSuperAdmin || !('superAdminOnly' in item && item.superAdminOnly))
+              .map(item => {
+              const accent = 'accent' in item && item.accent
               // V14.20 — isActive computato qui (non via NavLink callback) per compat con Radix asChild
               const isActive = location.pathname === item.to || location.pathname.startsWith(item.to + '/')
               const linkClass = cn(
@@ -159,7 +171,10 @@ export function Sidebar() {
                     : 'bg-gradient-to-r from-primary/15 to-primary/5 text-foreground font-medium border-l-2 border-primary shadow-[inset_0_0_20px_rgba(255,255,255,0.04)]'
                   : collapsed
                   ? 'text-muted-foreground'
-                  : 'text-muted-foreground border-l-2 border-transparent'
+                  : 'text-muted-foreground border-l-2 border-transparent',
+                // Dopo gli stati normali: con tailwind-merge vince l'ultima classe.
+                accent && !isActive && 'text-amber-300 bg-amber-500/10 hover:bg-amber-500/20',
+                accent && isActive && 'text-amber-200',
               )
               const label = (item as { label?: string }).label ?? t(item.i18nKey)
               const link = (

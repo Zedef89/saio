@@ -154,6 +154,10 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
   // V14.1: tick incrementato a onopen/onclose del WS per derivare reattivamente
   // l'abilitazione dell'input bar dal readyState corrente di wsRef.
   const [wsTick, setWsTick] = useState(0)
+  // Sessione di un altro: il server la apre in sola lettura e non inoltra i tasti
+  // (lib/pty-access.ts). Qui lo si dice e si spengono gli input, per non far sembrare rotto
+  // un terminale che non risponde.
+  const [readOnly, setReadOnly] = useState(false)
 
   // Settings (persist nel localStorage per progetto)
   const [model, setModel] = useState<ModelId>(() => {
@@ -428,6 +432,8 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
         const msg = JSON.parse(ev.data)
         if (msg.type === 'ready') {
           setStatus('ready')
+          setReadOnly(!!msg.readOnly)
+          term.options.disableStdin = !!msg.readOnly
           // V14.7: auto-inject kickoff è in un useEffect dedicato (no più stale closure su projectQ.data)
         } else if (msg.type === 'data') {
           term.write(msg.data)
@@ -831,7 +837,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
   // V14.1: input bar abilitato se status='ready' E il WS è effettivamente OPEN.
   // wsTick è incluso nella dependency virtuale per ri-renderizzare a onopen/onclose.
   const wsOpen = wsRef.current?.readyState === WebSocket.OPEN
-  const inputDisabled = status !== 'ready' || !wsOpen
+  const inputDisabled = status !== 'ready' || !wsOpen || readOnly
   void wsTick // forza il useMemo di disabled a re-leggere wsRef.current.readyState
 
   // Entrando/uscendo da tutto schermo il contenitore cambia dimensione: il terminale va
@@ -1112,6 +1118,12 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
           )}
         </div>
       </div>
+
+      {readOnly && (
+        <div className="px-3 py-1.5 border-b border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs">
+          Sola lettura: questa sessione è di un'altra persona. La vedi, ma i tuoi tasti non le arrivano.
+        </div>
+      )}
 
       {/* Barra comandi tmux — solo per il "Terminale condiviso" (projectId 'terminal').
           I bottoni iniettano le sequenze nel PTY: comodo da mobile dove Ctrl-b è scomodo. */}

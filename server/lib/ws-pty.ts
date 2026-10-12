@@ -134,14 +134,25 @@ interface UpgradeAuth {
    * ruolo sull'upgrade, spegnere il PTY ai guest lato Express non chiuderebbe niente.
    */
   role?: 'owner' | 'guest'
+  /** Il super admin (owner.json, oggi Nicola): shell root e scrittura in ogni sessione. */
+  superAdmin?: boolean
 }
 
 async function authenticateUpgrade(req: IncomingMessage, dataDir: string): Promise<UpgradeAuth> {
+  const auth = await authenticateUpgradeBase(req, dataDir)
+  if (auth.ok && auth.superAdmin === undefined) {
+    const { isSuperAdmin } = await import('./session-owner')
+    auth.superAdmin = await isSuperAdmin(dataDir, auth.email)
+  }
+  return auth
+}
+
+async function authenticateUpgradeBase(req: IncomingMessage, dataDir: string): Promise<UpgradeAuth> {
   // Master switch dev: bypassa tutto
-  if (!isAuthRequired()) return { ok: true, role: 'owner' }
+  if (!isAuthRequired()) return { ok: true, role: 'owner', superAdmin: true }
   // Desktop remote-only: la webview LOCALE entra senza login; il tunnel deve autenticarsi.
   if (process.env.DASHBOARD_AUTH_LOCAL_BYPASS === 'true' && isLocalDirectUpgrade(req))
-    return { ok: true, role: 'owner' }
+    return { ok: true, role: 'owner', superAdmin: true }
   // SSO via Cloudflare Access: header iniettato dall'edge dopo verifica identità.
   const cfEmailHeader = req.headers['cf-access-authenticated-user-email']
   const ownerEmail = (process.env.DASHBOARD_OWNER_EMAIL || '').trim().toLowerCase()
@@ -240,6 +251,27 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
           return
         }
         const projectId = match[1]
+        // Shell root, e chi scrive dove: la regola sta in pty-access.ts. La shell root si
+        // rifiuta qui, prima di qualsiasi altro controllo e a prescindere da SAIO_GUEST_PTY.
+        const { accessoPty } = await import('./pty-access')
+        const accesso = await accessoPty(
+          dataDir,
+          projectId,
+          { email: auth.email, superAdmin: !!auth.superAdmin },
+          (key) => ptyManager.get(key),
+        )
+        if (!accesso.ok) {
+          void audit({
+            type: 'access.denied',
+            email: auth.email,
+            ip: upgradeIp(req),
+            userAgentHash: '',
+            meta: { path: url.split('?')[0], projectId, reason: accesso.reason },
+          })
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
         // Un progetto che non gli e' stato dato non si apre nemmeno indovinandone l'id: il
         // filtro sulla lista nasconde la card, questo chiude la porta. E' la stessa ragione
         // per cui `requireOwner` sta sul mount e non solo nell'interfaccia.
@@ -258,6 +290,8 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
         const spawnOpts = parseSpawnOptions(url)
         // Identità di chi apre la sessione: decide worktree isolato e credenziali git.
         if (auth.email) spawnOpts.userEmail = auth.email
+        if (accesso.progettoId) spawnOpts.progettoId = accesso.progettoId
+        if (accesso.shellRootSession) spawnOpts.shellRootSession = accesso.shellRootSession
         // Un terminale aperto e' l'azione piu' pesante dell'interfaccia: va nell'audit con
         // chi, quando e su quale progetto, altrimenti resta solo nei log applicativi.
         void audit({
@@ -265,13 +299,16 @@ export function attachPtyWebSocket(server: HttpServer, dataDir: string) {
           email: auth.email,
           ip: upgradeIp(req),
           userAgentHash: '',
-          meta: { projectId, role: auth.role ?? 'owner' },
+          meta: { projectId, key: accesso.key, role: auth.role ?? 'owner', scrive: accesso.canWrite },
         })
         if (Object.keys(spawnOpts).length > 0) {
           logger.info(`[ws-pty] ${projectId} spawn opts from query: ${JSON.stringify(spawnOpts)}`)
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
-          handleConnection(ws, req, projectId, spawnOpts).catch((err) => {
+          handleConnection(ws, req, accesso.key, spawnOpts, {
+            canWrite: accesso.canWrite,
+            publicId: projectId,
+          }).catch((err) => {
             logger.error('[ws-pty] handleConnection failed:', err)
             try { ws.close(1011, 'handler error') } catch { /* ignore */ }
           })
@@ -292,7 +329,8 @@ async function handleConnection(
   ws: WebSocket,
   _req: IncomingMessage,
   projectId: string,
-  spawnOpts: SpawnOptions = {}
+  spawnOpts: SpawnOptions = {},
+  access: { canWrite: boolean; publicId: string } = { canWrite: true, publicId: projectId },
 ) {
   // Il socket è già aperto quando entriamo qui, ma la sessione può richiedere secondi a
   // nascere (spawn + attach tmux). Il client manda SUBITO il suo primo `resize` — cioè la
@@ -364,6 +402,9 @@ async function handleConnection(
   const onMessage = (raw: unknown) => {
     try {
       const msg = JSON.parse(String(raw))
+      // Chi guarda non scrive: i tasti e la chiusura si fermano qui, nel server, qualunque
+      // cosa faccia l'interfaccia. Il resize resta: chi guarda ha un PTY suo (`tmuxro-`).
+      if (!access.canWrite && (msg.type === 'data' || msg.type === 'kill')) return
       if (msg.type === 'data' && typeof msg.data === 'string') {
         ptyManager.write(projectId, msg.data)
       } else if (msg.type === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) {
@@ -400,5 +441,5 @@ async function handleConnection(
   })
 
   // Tell client ready
-  ws.send(JSON.stringify({ type: 'ready', projectId, pid: session.proc.pid }))
+  ws.send(JSON.stringify({ type: 'ready', projectId: access.publicId, pid: session.proc.pid, readOnly: !access.canWrite }))
 }

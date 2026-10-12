@@ -4,6 +4,11 @@ import { vpsStateStore, KNOWN_CLIS } from '../lib/vps-state-store'
 import { VPS_HOSTS } from '../lib/ssh-inventory'
 import { logger } from '../lib/logger'
 import { auditAction } from '../lib/auth/audit'
+import path from 'node:path'
+
+function DATA_DIR(): string {
+  return process.env.DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data')
+}
 
 export function ptyRouter() {
   const router = Router()
@@ -30,13 +35,29 @@ export function ptyRouter() {
   })
 
   // Chiudere una sessione e' un'azione distruttiva su lavoro altrui: il terminale di un
-  // collega puo' avere Claude a meta' di un'implementazione. L'owner puo' su tutte (deve
-  // poter sbloccare la macchina), un guest solo sulle proprie.
-  router.delete('/:projectId', (req, res) => {
+  // collega puo' avere Claude a meta' di un'implementazione. Il super admin puo' su tutte (deve
+  // poter sbloccare la macchina), gli altri — owner dell'allowlist compresi — solo sulle
+  // proprie. La regola e' in lib/pty-access.ts, la stessa del WebSocket.
+  router.delete('/:projectId', async (req, res) => {
     const id = req.params.projectId.replace(/[^a-zA-Z0-9_-]/g, '')
     if (!id) return res.status(400).json({ error: 'invalid id' })
-    const session = ptyManager.get(id)
-    if (session && req.user?.role === 'guest' && session.ownerEmail !== req.user.email) {
+    const { puoChiuderePty } = await import('../lib/pty-access')
+    const { isSuperAdmin, ownerSlugForEmail } = await import('../lib/session-owner')
+    const dataDir = DATA_DIR()
+    const utente = { email: req.user?.email, superAdmin: await isSuperAdmin(dataDir, req.user?.email) }
+    let key = id
+    let session = ptyManager.get(key)
+    // La card aperta da due persone: la seconda ha il PTY sulla chiave personale
+    // (`<progetto>__<slug>`, vedi accessoPty). Chiudere «la card» vuol dire chiudere il suo.
+    if (req.user?.email && !(await puoChiuderePty(dataDir, key, utente, session))) {
+      const personale = `${id}__${await ownerSlugForEmail(dataDir, req.user.email)}`
+      if (ptyManager.get(personale)) {
+        key = personale
+        session = ptyManager.get(key)
+      }
+    }
+    if (!session) return res.json({ ok: false })
+    if (!(await puoChiuderePty(dataDir, key, utente, session))) {
       auditAction(req, 'access.denied', {
         method: 'DELETE',
         path: `/pty/${id}`,
@@ -44,7 +65,7 @@ export function ptyRouter() {
       })
       return res.status(403).json({ error: 'not_your_session' })
     }
-    const killed = ptyManager.kill(id)
+    const killed = ptyManager.kill(key)
     res.json({ ok: killed })
   })
 
@@ -140,6 +161,16 @@ export function ptyRouter() {
     const vpsId = String(req.params.vpsId).replace(/[^a-zA-Z0-9_-]/g, '')
     const projectId = String(req.params.projectId).replace(/[^a-zA-Z0-9_-]/g, '')
     if (!vpsId || !projectId) return res.status(400).json({ error: 'invalid ids' })
+    // Le chiavi riservate (shell root, sessioni tmux, chiavi personali delle card) non si
+    // aprono da qui: getOrCreate le riconosce dal nome prima di guardare `remote`, e questa
+    // route diventerebbe una porta laterale sulla shell root o sul terminale di un altro.
+    if (/^(terminal|shell-root|tmux-|tmuxro-)|__/.test(projectId)) {
+      const { isSuperAdmin } = await import('../lib/session-owner')
+      if (!(await isSuperAdmin(DATA_DIR(), req.user?.email))) {
+        auditAction(req, 'access.denied', { method: 'POST', path: `/pty/remote/${vpsId}/${projectId}/spawn`, reason: 'chiave riservata' })
+        return res.status(403).json({ error: 'reserved_pty_id' })
+      }
+    }
 
     const vps = VPS_HOSTS.find((v) => v.id === vpsId)
     if (!vps) return res.status(404).json({ error: 'unknown vpsId' })

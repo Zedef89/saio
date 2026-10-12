@@ -266,8 +266,17 @@ export function systemRouter(): Router {
       // Le etichette delle sessioni chiuse non servono piu': qui e' l'unico punto che sa
       // quali esistono davvero. Non si aspetta e non puo' far fallire la lista.
       void pruneAliases(DATA_DIR(), sessions.map((s) => ({ name: s.name, created: s.created })))
+      // Chi puo' scrivere in ciascuna: tutti vedono tutto, si scrive solo nelle proprie (il
+      // super admin ovunque). Il blocco vero e' nel WebSocket; qui serve all'interfaccia per
+      // dirlo prima di aprire, invece di far scoprire la sola lettura al primo tasto.
+      const { isSuperAdmin } = await import('../lib/session-owner')
+      const superAdmin = await isSuperAdmin(DATA_DIR(), req.user?.email)
+      const conScrittura = visibili.map((s) => ({
+        ...s,
+        canWrite: superAdmin || (!!mio && s.owner?.slug === mio),
+      }))
       // `me` serve alla pagina per aprire solo il gruppo di chi guarda.
-      res.json({ sessions: visibili, me: mio })
+      res.json({ sessions: conScrittura, me: mio, superAdmin })
     } catch {
       // tmux assente o nessuna sessione: lista vuota, non è un errore
       res.json({ sessions: [] })
@@ -644,7 +653,16 @@ export function systemRouter(): Router {
     const { withOwnerPrefix } = await import('../lib/session-owner')
     const requester =
       req.user?.email || (req.headers['cf-access-authenticated-user-email'] as string) || null
-    const name = await withOwnerPrefix(rawName, DATA_DIR(), requester)
+    let name = await withOwnerPrefix(rawName, DATA_DIR(), requester)
+    const { isSuperAdmin, knownOwners, ownerFromName, ownerSlugForEmail } = await import('../lib/session-owner')
+    const superAdmin = await isSuperAdmin(DATA_DIR(), requester)
+    // Il prefisso e' il proprietario: chi non e' il super admin non apre una sessione col nome
+    // di un altro (`alberto-…`), che poi risulterebbe di Alberto. Gli si mette davanti il suo.
+    if (!superAdmin && requester) {
+      const mio = await ownerSlugForEmail(DATA_DIR(), requester)
+      const di = ownerFromName(name, await knownOwners(DATA_DIR()))
+      if (di && di.slug !== mio) name = `${mio}-${name}`
+    }
 
     try {
       const { execFile } = await import('node:child_process')
@@ -660,6 +678,15 @@ export function systemRouter(): Router {
         persona = await personaUnix(DATA_DIR(), requester)
       } catch (err) {
         res.status(500).json({ error: 'persona_non_risolta', message: (err as Error).message })
+        return
+      }
+
+      // Una sessione senza Claude ne' Codex, per chi gira come root, e' una shell root: e quella
+      // la apre solo il super admin (Nicola, 12/10/2026). Chi ha un utente Unix suo ha una
+      // shell sua, che root non e'.
+      if (!startClaude && !persona && !superAdmin) {
+        auditAction(req, 'access.denied', { method: 'POST', path: '/system/tmux-sessions', reason: 'shell root: solo il super admin' })
+        res.status(403).json({ error: 'shell_root_solo_admin', message: 'Una sessione senza Claude è una shell root: la apre solo Nicola.' })
         return
       }
 

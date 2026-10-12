@@ -373,6 +373,37 @@ export interface SpawnOptions {
   worktreeLabel?: string
   /** Path esplicito di un worktree già esistente scelto dall'utente. */
   worktreePath?: string
+  /**
+   * Il progetto vero, quando la chiave del PTY non e' l'id del progetto. Succede quando la
+   * card di un progetto e' gia' aperta da un'altra persona: il PTY e' indicizzato per chiave,
+   * e senza una chiave sua il secondo arrivato finiva nel terminale del primo — a scrivere
+   * nel suo worktree, con la sua identita'. Vedi `chiavePtyCard` in ws-pty.ts.
+   */
+  progettoId?: string
+  /** Nome della sessione tmux della shell root dell'admin (`shell-root`). */
+  shellRootSession?: string
+}
+
+/**
+ * Le opzioni `-S <socket>` per parlare al server tmux su cui vive questa sessione, quando il
+ * PTY gira come root ma la sessione e' di una persona con un utente Unix suo (il suo server
+ * sta in `/tmp/tmux-<uid>/default`). Root puo' sempre attaccarsi al server di un altro utente.
+ * Stringa vuota = il server di default di chi lancia il comando.
+ */
+async function socketTmuxPer(dataDir: string, sessionName: string): Promise<string> {
+  try {
+    const { fonteDellaSessione } = await import('./tmux-cmd')
+    const fonte = await fonteDellaSessione(dataDir, sessionName)
+    if (!fonte) return ''
+    const sock = path.join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${fonte.uid}`, 'default')
+    if (!fs.existsSync(sock)) return ''
+    // Il prefisso non basta: le sessioni del semi-loop (`marco-leva-…`) portano il nome di una
+    // persona ma girano nel tmux di root. Si usa il suo server solo se la sessione e' li'.
+    await execFileAsync(TMUX_BIN, ['-S', sock, 'has-session', '-t', `=${sessionName}`], { timeout: 3000 })
+    return `-S ${sock}`
+  } catch {
+    return ''
+  }
 }
 
 export interface RemoteSpawnTarget {
@@ -735,7 +766,10 @@ class PtyManager {
       return { error: `Limite di ${MAX_SESSIONS} sessioni PTY raggiunto: chiudine una prima di aprirne un'altra. Aperte: ${aperte}` }
     }
 
-    const cwd = opts.cwd || this.workspaceDirFor(projectId)
+    // La chiave del PTY e il progetto coincidono, tranne quando la card e' gia' aperta da un
+    // altro (vedi `progettoId`): le ricerche nel registro progetti vanno fatte sul progetto.
+    const progetto = opts.progettoId || projectId
+    const cwd = opts.cwd || this.workspaceDirFor(progetto)
     // Locale UTF-8 forzata: SAIO parte come app GUI macOS, che NON eredita LANG dalla
     // shell. Senza locale i caratteri accentati arrivano al PTY come '_' (sia in input
     // che in output): "non è" diventava "non _", "così" → "cos_".
@@ -764,7 +798,7 @@ class PtyManager {
         // Check project override first
         try {
           const { projectsStore } = await import('./projects-store')
-          const proj = await projectsStore.findById(projectId)
+          const proj = await projectsStore.findById(progetto)
           if (proj?.accountOverride) {
             account = await accountsStore.findById(proj.accountOverride)
             if (account) {
@@ -813,7 +847,9 @@ class PtyManager {
     // quindi basta che il processo giri col suo uid — nessun `-L` da ricordarsi. Vale anche per
     // le sessioni che apre a mano via SSH, che cosi' sono le stesse che vede in SAIO.
     let __persona: PersonaUnix | null = null
-    if (!opts.remote) {
+    // Lo spettatore (`tmuxro-`) si attacca come root in sola lettura: deve vedere anche le
+    // sessioni che stanno sul server tmux di un altro utente, e non scrive niente.
+    if (!opts.remote && !projectId.startsWith('tmuxro-')) {
       try {
         __persona = await personaUnix(this.dataDir, opts.userEmail)
       } catch (err: any) {
@@ -828,7 +864,7 @@ class PtyManager {
     if (projectId !== 'terminal' && !opts.remote) {
       try {
         const { projectsStore } = await import('./projects-store')
-        const __p = await projectsStore.findById(projectId)
+        const __p = await projectsStore.findById(progetto)
         const __nm = __p?.name
         if (__nm && /^[a-zA-Z0-9._-]+$/.test(__nm) && fs.existsSync(path.join(__devRoot, __nm))) {
           __tmuxName = __nm
@@ -852,12 +888,33 @@ class PtyManager {
       effectiveCmd = `${TMUX_BIN} new-session -A -s main \\; choose-tree -Zs`
       tmuxSession = 'main'
       logger.info(`[pty] ${projectId}: shared tmux terminal (choose-tree) → ${effectiveCmd}`)
+    } else if (projectId === 'shell-root') {
+      // Shell root dell'admin (Nicola, 12/10/2026): una sessione tmux sua, ripresa se c'e'.
+      // Il permesso lo controlla ws-pty.ts prima di arrivare qui.
+      const __sess = opts.shellRootSession || 'admin-shell-root'
+      if (!/^[a-zA-Z0-9._-]+$/.test(__sess)) return { error: `invalid tmux session: ${__sess}` }
+      effectiveCmd = `exec ${TMUX_BIN} new-session -A -s ${__sess} -c ${os.homedir()}`
+      tmuxSession = __sess
+      logger.info(`[pty] ${projectId}: shell root → ${effectiveCmd}`)
+    } else if (projectId.startsWith('tmuxro-')) {
+      // Chi guarda la sessione di un altro: un client tmux in SOLA LETTURA (i tasti non
+      // arrivano alla sessione) e che non ne cambia la geometria (`ignore-size`), cosi' chi ci
+      // lavora non si ritrova la finestra ristretta dallo schermo di chi guarda. Il blocco vero
+      // sta comunque in ws-pty.ts, che a questa connessione non inoltra nessun tasto.
+      const __sess = projectId.slice(7)
+      if (!/^[a-zA-Z0-9._-]+$/.test(__sess)) return { error: `invalid tmux session: ${__sess}` }
+      const __sock = await socketTmuxPer(this.dataDir, __sess)
+      effectiveCmd = `exec ${TMUX_BIN} ${__sock} attach -f read-only,ignore-size -t =${__sess}`.replace(/  +/g, ' ')
+      tmuxSession = __sess
+      logger.info(`[pty] ${projectId}: sola lettura su sessione tmux "${__sess}"`)
     } else if (projectId.startsWith('tmux-')) {
       // Pagina "Sessioni": attach diretto alla sessione tmux scelta dalla lista.
       // projectId = `tmux-<nome-sessione>`.
       const __sess = projectId.slice(5)
       if (!/^[a-zA-Z0-9._-]+$/.test(__sess)) return { error: `invalid tmux session: ${__sess}` }
-      effectiveCmd = `exec ${TMUX_BIN} attach -t ${__sess}`
+      // Da root (Nicola) sulla sessione di chi ha un utente suo: il server tmux e' il suo.
+      const __sock = __persona ? '' : await socketTmuxPer(this.dataDir, __sess)
+      effectiveCmd = `exec ${TMUX_BIN} ${__sock} attach -t ${__sess}`.replace(/  +/g, ' ')
       tmuxSession = __sess
       logger.info(`[pty] ${projectId}: attach diretto a sessione tmux "${__sess}"`)
     } else if (__tmuxName) {
