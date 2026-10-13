@@ -690,10 +690,16 @@ export function systemRouter(): Router {
         return
       }
 
-      // Codex e' configurato solo per root, non nelle aree Unix personali.
-      if (cli === 'codex' && persona) {
-        res.status(400).json({ error: 'codex_solo_root' })
-        return
+      // Verifica come l'utente reale: root leggerebbe anche una config inaccessibile a lei.
+      if (cli === 'codex' && persona && startClaude) {
+        const check = comeLaPersona(persona, ['sh', '-c',
+          'command -v codex >/dev/null && test -r "$HOME/.codex/config.toml" && test -r "$HOME/.codex/AGENTS.md" && test -r "$HOME/.codex/auth.json" && test -w "$HOME/.codex/auth.json"'])
+        try {
+          await execFileAsync(check.file, check.args)
+        } catch {
+          res.status(400).json({ error: 'codex_non_configurato', message: `Codex non configurato per ${persona.user}: servono CLI, ~/.codex/config.toml, AGENTS.md e autenticazione condivisa leggibile e scrivibile. Contatta l'amministratore.` })
+          return
+        }
       }
 
       // Già viva? Non ricreare: il frontend ci si attacca e basta.
