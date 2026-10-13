@@ -1,3 +1,4 @@
+import { CodexUsage } from '@/components/CodexUsage'
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -931,6 +932,8 @@ export function SessionsPage() {
               />
               Avvia <span className="font-mono">{newCli}</span> all'apertura
             </label>
+
+            <CodexUsage enabled={showNew} />
 
             {/* Quale abbonamento usare: preselezionato quello con la settimana più libera. */}
             {newStartClaude && newCli === 'claude' && (

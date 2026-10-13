@@ -904,6 +904,11 @@ export function systemRouter(): Router {
   // Account Claude configurati sul server + quanto resta della finestra token settimanale.
   // Ordinati dal più libero al più carico: il primo è quello da preselezionare.
   // ?refresh=1 salta la cache di 60s.
+  router.get('/codex-usage', async (_req, res) => {
+    const { getCodexUsage } = await import('../lib/codex-usage')
+    res.json({ usage: await getCodexUsage() })
+  })
+
   router.get('/claude-accounts', async (req, res) => {
     try {
       const { listClaudeAccounts } = await import('../lib/claude-accounts')

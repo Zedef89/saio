@@ -1,3 +1,4 @@
+import { CodexUsage } from '@/components/CodexUsage'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Terminal } from '@xterm/xterm'
@@ -1268,6 +1269,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
               non verrà ripresa al prossimo apri.
             </DialogDescription>
           </DialogHeader>
+          <CodexUsage enabled={freshConfirmOpen} />
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setFreshConfirmOpen(false)}>
               Annulla
