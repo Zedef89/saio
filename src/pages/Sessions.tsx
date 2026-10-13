@@ -214,7 +214,8 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
       </span>
       <span className="block text-[9px] text-muted-foreground/70">
         {piena ? `${piena} · ` : ''}
-        {a.stale ? `dato di ${a.staleMinutes} min fa` : resetLabel(reset)}
+        {/* Nicola 13/10: col dato vecchio (dopo un 429) si mostra ANCHE quando si ripristina: l'ora del reset resta valida. */}
+        {a.stale ? `dato di ${a.staleMinutes} min fa · ` : ''}{resetLabel(reset)}
       </span>
     </>
   )
