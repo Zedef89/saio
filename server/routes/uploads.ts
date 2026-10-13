@@ -22,7 +22,7 @@ const ALLOWED_MIME = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'text/plain', 'text/markdown', 'text/csv', 'application/json',
+  'text/plain', 'text/markdown', 'text/x-markdown', 'text/csv', 'application/json',
   'text/html', 'application/xhtml+xml',
   'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
   'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/flac',
@@ -34,9 +34,10 @@ const ALLOWED_MIME = new Set([
  * Estensioni ammesse anche quando il browser manda un MIME generico.
  * Safari/iOS e alcuni file manager marcano gli zip come `application/octet-stream`:
  * senza questo fallback l'export di una chat verrebbe rifiutato. Stesso discorso
- * per gli .html salvati da alcuni browser/app senza tipo.
+ * per gli .html salvati da alcuni browser/app senza tipo, e per i .md: Windows e
+ * molti browser non conoscono il tipo del markdown e lo mandano vuoto (Nicola, 13/10).
  */
-const ALLOWED_EXT_FALLBACK = new Set(['.zip', '.html', '.htm'])
+const ALLOWED_EXT_FALLBACK = new Set(['.zip', '.html', '.htm', '.md', '.markdown'])
 const GENERIC_MIME = new Set(['application/octet-stream', 'application/x-compressed', ''])
 
 function sanitizeName(name: string): string {

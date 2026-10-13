@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 const MAX_FILES = 10
-const ACCEPT = 'application/pdf,image/png,image/jpeg,image/webp,text/plain,text/markdown'
+const ACCEPT = 'application/pdf,image/png,image/jpeg,image/webp,text/plain,text/markdown,.md,.markdown'
 
 interface PendingFile {
   file: File

@@ -14,7 +14,11 @@ const ALLOWED_MIME = new Set([
   'image/webp',
   'text/plain',
   'text/markdown',
+  'text/x-markdown',
 ])
+// I .md arrivano spesso senza tipo (Windows, molti browser): si ammettono per estensione
+const MARKDOWN_EXT = new Set(['.md', '.markdown'])
+const GENERIC_MIME = new Set(['application/octet-stream', ''])
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20MB
 const MAX_FILES = 10
 
@@ -52,7 +56,9 @@ export function newProjectRouter(dataDir: string) {
     }),
     limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES },
     fileFilter: (_req, file, cb) => {
-      if (!ALLOWED_MIME.has(file.mimetype)) {
+      const ext = path.extname(file.originalname || '').toLowerCase()
+      const okMarkdown = MARKDOWN_EXT.has(ext) && GENERIC_MIME.has(file.mimetype)
+      if (!ALLOWED_MIME.has(file.mimetype) && !okMarkdown) {
         return cb(new Error(`MIME not allowed: ${file.mimetype}`))
       }
       cb(null, true)
