@@ -7,6 +7,7 @@ import os from 'node:os'
 import { logger } from '../lib/logger'
 import { orchestratorScript } from '../lib/orchestrator-paths'
 import { resolvePythonExe } from '../lib/python-deps-check'
+import { researchAccount, accountCommand } from '../lib/deep-research-account'
 
 const DEEP_SCRIPT = orchestratorScript('spawn_deepresearch.py')
 const DOCS_DIR = path.join(os.homedir(), 'Documents')
@@ -33,7 +34,7 @@ export function deepResearchRouter() {
 
   router.post('/start', async (req, res) => {
     try {
-      const { title, query, mode } = req.body as { title?: string; query?: string; mode?: Mode }
+      const { title, query, mode, account } = req.body as { title?: string; query?: string; mode?: Mode; account?: string }
       if (!query || query.length < 3 || query.length > 2000) {
         return res.status(400).json({ error: 'query 3-2000 chars required' })
       }
@@ -41,6 +42,15 @@ export function deepResearchRouter() {
         return res.status(400).json({ error: 'invalid mode' })
       }
       const slug = slugify(title || query)
+      const { listClaudeAccounts, configDirForAccount } = await import('../lib/claude-accounts')
+      let accountId: string
+      try {
+        accountId = researchAccount(await listClaudeAccounts(), account)
+      } catch (error) {
+        return res.status(409).json({ error: (error as Error).message })
+      }
+      const configDir = await configDirForAccount(accountId)
+      if (!configDir) return res.status(409).json({ error: 'Account non più disponibile' })
       const pyExe = await resolvePythonExe()
 
       // Sul devbox non c'e' nessun desktop su cui aprire una finestra: la ricerca gira in una
@@ -56,7 +66,7 @@ export function deepResearchRouter() {
       // sapere chi le aveva chieste, e non sapevano a chi mandare il PDF.
       const { writeIdentityFile, withIdentityFile } = await import('../lib/session-identity')
       const claudeCmd = withIdentityFile(
-        withPermissionMode('claude'),
+        accountCommand(configDir, withPermissionMode('claude')),
         await writeIdentityFile(DATA_DIR(), requester),
       )
 
