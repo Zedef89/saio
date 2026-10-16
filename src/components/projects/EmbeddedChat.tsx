@@ -690,6 +690,8 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
 
   // V14.23 — sostituito window.confirm() nativo con Dialog SAIO
   const [freshConfirmOpen, setFreshConfirmOpen] = useState(false)
+  // Clear con conferma (Nicola 16/10/2026: da mobile partiva col dito, e /clear svuota il contesto)
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
   const startFresh = () => {
     setFreshConfirmOpen(true)
   }
@@ -1084,7 +1086,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
               size="sm"
               variant="ghost"
               className="h-6 text-[10px] gap-1 text-orange-400 hover:text-orange-300 hover:bg-orange-500/10"
-              onClick={() => sendText('/clear', true)}
+              onClick={() => setClearConfirmOpen(true)}
               title="Invia /clear alla CLI — pulisce la conversazione visibile E resetta il contesto del modello (libera il context window). Stesso PTY, sessione mantenuta."
             >
               <Eraser className="w-3 h-3" /> Clear
@@ -1277,6 +1279,32 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
             <Button onClick={confirmStartFresh} className="gap-1.5">
               <RotateCcw className="w-3.5 h-3.5" />
               Inizia da zero
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* Conferma prima di mandare /clear alla CLI */}
+      <Dialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Eraser className="w-4 h-4 text-orange-400" />
+              Sei sicuro di voler fare il clear?
+            </DialogTitle>
+            <DialogDescription>
+              Pulisce la conversazione visibile e azzera il contesto del modello. La conversazione resta salvata e si riprende con <code className="text-[11px] bg-muted px-1 rounded">/resume</code>.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>
+              Annulla
+            </Button>
+            <Button
+              onClick={() => { setClearConfirmOpen(false); sendText('/clear', true) }}
+              className="gap-1.5 bg-orange-500 hover:bg-orange-600 text-white"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              Sì, fai il clear
             </Button>
           </DialogFooter>
         </DialogContent>
