@@ -118,9 +118,18 @@ def main() -> int:
 
     # Build claude prompt that triggers skill with mode hint
     claude_cmd_hint = f"/deep-research {safe_query}"
+    # Dove va e in che forma (Nicola, 16/10/2026, scheda c626ea26): fino ad allora la ricerca finiva
+    # in ~/Documents, dove nessuno la cercava, con PDF fino a 46 pagine. Ora una cartella in
+    # deliverables, RICERCA.md per le macchine, 3-5 slide per la persona (§11 del manuale) e una riga
+    # nella memoria «ricerche-fatte», che e' anche il primo posto dove si guarda prima di rifarla.
+    cartella = f"/root/deliverables/ricerca-{slug[:40]}-{datetime.now().strftime('%Y%m%d')}"
+    registro = "/srv/taskless/devbox-config/bin/ricerche-fatte.py"
     kickoff_msg = (
         f"Usa la skill /deep-research in modalita {mode.upper()} sul topic: {safe_query}. "
-        f"Output: PDF + Markdown + HTML in ~/Documents/ come da default della skill. "
+        f"Prima: {registro} cerca \"{safe_query[:60]}\" (anche con un sinonimo): se c'e' gia', parti da quella. "
+        f"Output in {cartella}/: RICERCA.md (per le macchine: dettaglio, fonti, prove) "
+        f"+ un PDF di 3-5 slide per la persona (paragrafo 11 del manuale), mai in ~/Documents. "
+        f"Alla fine: {registro} aggiungi --cartella {cartella} --titolo \"...\" --sintesi \"...\". "
         f"Se necessario plan mode, procedi autonomo. "
         # Il 03/10/2026 tre sessioni hanno rifatto la stessa ricerca sui tablet nello stesso
         # giorno: la lavagna dei temi le mette in vista l'una all'altra.
