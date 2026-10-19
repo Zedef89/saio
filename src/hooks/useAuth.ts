@@ -12,7 +12,13 @@ export interface MeResponse {
 export const AUTH_ME_KEY = ['auth', 'me'] as const
 
 async function fetchMe(): Promise<MeResponse> {
-  const res = await fetch('/api/auth/me', { credentials: 'include' })
+  let res = await fetch('/api/auth/me', { credentials: 'include' })
+  // Il cookie di accesso dura 1 ora, quello di refresh 7 giorni: senza questo tentativo chi
+  // riapriva la pagina dopo un'ora finiva sul login con una sessione ancora valida.
+  if (res.status === 401) {
+    const refreshRes = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' }).catch(() => null)
+    if (refreshRes?.ok) res = await fetch('/api/auth/me', { credentials: 'include' })
+  }
   if (!res.ok) {
     if (res.status === 401) throw new Error('unauthenticated')
     throw new Error(`auth/me ${res.status}`)
