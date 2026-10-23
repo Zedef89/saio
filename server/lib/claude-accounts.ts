@@ -27,14 +27,20 @@ const FETCH_TIMEOUT_MS = 5000
 const CACHE_TTL_MS = 5 * 60_000
 
 /**
- * Dopo un 429 l'endpoint usage resta muto per un po': continuare a bussare lo tiene muto e
- * basta. Per questa finestra si serve l'ultimo dato salvato senza nemmeno provare.
+ * Dopo un 429 l'endpoint usage resta muto per un po' per QUELL'account: continuare a bussare lo
+ * tiene muto e basta. Per questa finestra si serve l'ultimo dato salvato senza nemmeno provare.
  *
  * L'attesa cresce a ogni rifiuto consecutivo e si azzera alla prima lettura riuscita: quando il
  * limite e' passeggero si torna subito ai dati freschi, quando e' serio si smette davvero di
- * insistere.
+ * insistere. Se Anthropic manda `Retry-After`, vale quello quando e' piu' lungo.
  */
 const BACKOFF_STEPS_MS = [2 * 60_000, 5 * 60_000, 10 * 60_000, 20 * 60_000]
+
+/**
+ * Tanti 429 di fila nello stesso giro, su account diversi, vogliono dire che il limite e' della
+ * macchina e non dei singoli account: il giro si ferma li', gli altri si servono dalla cache.
+ */
+const GIRO_FERMO_DOPO_429 = 3
 
 /** Un dato vecchio piu' di cosi' non dice piu' niente di utile: meglio dichiararlo assente. */
 const STALE_MAX_MS = 6 * 60 * 60_000
@@ -62,14 +68,53 @@ function usageCacheFile(): string {
 
 let snapshots: Record<string, UsageSnapshot> | null = null
 /**
- * Quando ha senso ritentare. E' UNO per tutti, non per account: il 429 di questo endpoint
- * arriva dall'IP della macchina, non dall'abbonamento — verificato interrogandolo a mano con i
- * token dei quattro account, che rispondono 429 tutti insieme. Ritentare con l'account
- * successivo non aggira niente: allunga soltanto il periodo di punizione.
+ * Quando ha senso ritentare, PER ACCOUNT (g634, 23/10/2026). Prima era uno per tutti, sull'idea
+ * che il 429 arrivasse dall'IP: invece arriva dal singolo token. Interrogato a mano alle 16:59,
+ * l'account d (token scaduto da 40 ore) rispondeva 429 con `Retry-After: 1105` e subito dopo i e
+ * j rispondevano 200. Il giro andava default, b, c, d: al 429 di d si fermavano le letture di
+ * tutti gli altri, e da f a n la cache e' rimasta ferma per ore.
  */
-let retryAfterAll = 0
-/** Quanti 429 di fila: sceglie quanto aspettare fra i BACKOFF_STEPS_MS. */
-let rifiutiConsecutivi = 0
+const attese: Record<string, { fino: number; rifiuti: number }> = {}
+
+/** Quanto aspettare dopo il `rifiuti`-esimo 429 di fila di un account: la scala, o Retry-After se piu' lungo. */
+export function attesaDopo429(rifiuti: number, retryAfter: string | null): number {
+  const scala = BACKOFF_STEPS_MS[Math.min(Math.max(rifiuti, 0), BACKOFF_STEPS_MS.length - 1)]
+  const secondi = Number(retryAfter)
+  return retryAfter && Number.isFinite(secondi) && secondi > 0 ? Math.max(scala, secondi * 1000) : scala
+}
+
+/** Errore di lettura che si porta dietro il `Retry-After` del 429, se c'era. */
+class ErroreUsage extends Error {
+  constructor(
+    message: string,
+    readonly retryAfter: string | null = null,
+  ) {
+    super(message)
+  }
+}
+/** Ultima lettura fallita per un motivo dell'account (401, timeout), non per il 429: tiene in fondo al giro chi non risponde. */
+const tentativi: Record<string, number> = {}
+
+/**
+ * In che ordine leggere gli account in un giro (g634, 23/10/2026): prima chi ha il dato piu' vecchio.
+ *
+ * L'endpoint risponde 429 dopo tre o quattro letture, e il giro partiva sempre da default, b, c:
+ * quei tre si rinnovavano ogni cinque minuti e da f in poi la cache e' rimasta ferma per ore. Chi
+ * legge la cache scarta giustamente un dato vecchio, quindi gli account con quota sparivano dalla
+ * scelta e il semi-loop diceva «nessun abbonamento libero». Cosi' il 429 interrompe il giro su chi
+ * e' gia' fresco, e in pochi giri passano tutti.
+ *
+ * Conta anche l'ultima lettura fallita per colpa dell'account (non il 429): uno col token scaduto
+ * risponde 401, non aggiorna mai la sua lettura e altrimenti si mangerebbe il primo posto di ogni giro.
+ */
+export function ordineLettura<T extends { id: string }>(
+  slots: T[],
+  snaps: Record<string, { at: number } | undefined>,
+  tentati: Record<string, number> = {},
+): T[] {
+  const eta = (s: T) => Math.max(snaps[s.id]?.at ?? 0, tentati[s.id] ?? 0)
+  return [...slots].sort((a, b) => eta(a) - eta(b))
+}
 
 async function loadSnapshots(): Promise<Record<string, UsageSnapshot>> {
   if (snapshots) return snapshots
@@ -406,7 +451,10 @@ async function fetchUsage(token: string): Promise<ClaudeAccountUsage> {
       signal: ctrl.signal,
     })
     if (!res.ok) {
-      throw new Error(res.status === 401 ? 'token scaduto — riapri una sessione con questo account' : `HTTP ${res.status}`)
+      throw new ErroreUsage(
+        res.status === 401 ? 'token scaduto — riapri una sessione con questo account' : `HTTP ${res.status}`,
+        res.headers.get('retry-after'),
+      )
     }
     const data = await res.json()
     const weekly = Number(data?.seven_day?.utilization ?? 0)
@@ -440,11 +488,12 @@ let cache: { at: number; accounts: ClaudeAccount[] } | null = null
  * `force` salta la cache (bottone "aggiorna" nella modale).
  */
 /** Perche' il dato manca e quando tornera': un "n/d" secco non aiuta a scegliere. */
-function attesaLabel(): string {
-  if (!retryAfterAll) return 'lettura non riuscita'
+function attesaLabel(id: string): string {
+  const fino = attese[id]?.fino ?? 0
+  if (!fino) return 'lettura non riuscita'
   // Fuso esplicito: il server gira in UTC, chi legge sta in Italia — senza, l'orario mostrato
   // e' indietro di due ore e sembra che il tentativo sia gia' passato.
-  const ora = new Date(retryAfterAll).toLocaleTimeString('it-IT', {
+  const ora = new Date(fino).toLocaleTimeString('it-IT', {
     hour: '2-digit',
     minute: '2-digit',
     timeZone: 'Europe/Rome',
@@ -461,7 +510,8 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
 
   // Sequenziale e distanziato: quattro richieste insieme allo stesso endpoint sono il modo
   // piu' veloce per prendersi un 429 e restare senza percentuali proprio quando servono.
-  for (const [i, slot] of slots.entries()) {
+  let rifiutiDiFila = 0
+  for (const [i, slot] of ordineLettura(slots, snaps, tentativi).entries()) {
     if (i > 0) await new Promise((r) => setTimeout(r, SPACING_MS))
     const email = await readEmail(slot)
     const plan = await readPlan(slot)
@@ -489,29 +539,39 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
       continue
     }
 
-    // Finestra di riposo dopo un 429: si serve la cache senza nemmeno provare.
-    if (Date.now() < retryAfterAll) {
-      accounts.push(fallback(attesaLabel()))
+    // Finestra di riposo dopo un 429 di questo account: si serve la cache senza nemmeno provare.
+    if (Date.now() < (attese[slot.id]?.fino ?? 0)) {
+      accounts.push(fallback(attesaLabel(slot.id)))
+      continue
+    }
+    if (rifiutiDiFila >= GIRO_FERMO_DOPO_429) {
+      accounts.push(fallback('lettura rimandata al prossimo giro'))
       continue
     }
 
     try {
       const usage = await fetchUsage(token)
       await saveSnapshot(slot.id, usage)
-      retryAfterAll = 0
-      rifiutiConsecutivi = 0
+      delete attese[slot.id]
+      rifiutiDiFila = 0
       accounts.push({ ...base, usage, error: null })
     } catch (err) {
       const message = (err as Error).name === 'AbortError' ? 'timeout' : (err as Error).message
       if (message.includes('429')) {
-        const attesa = BACKOFF_STEPS_MS[Math.min(rifiutiConsecutivi, BACKOFF_STEPS_MS.length - 1)]
-        rifiutiConsecutivi += 1
-        retryAfterAll = Date.now() + attesa
-        logger.warn(`[claude-accounts] 429 sull'endpoint usage (limite per IP): fermo le letture per ${attesa / 60_000} min`)
+        const rifiuti = attese[slot.id]?.rifiuti ?? 0
+        const attesa = attesaDopo429(rifiuti, err instanceof ErroreUsage ? err.retryAfter : null)
+        attese[slot.id] = { fino: Date.now() + attesa, rifiuti: rifiuti + 1 }
+        rifiutiDiFila += 1
+        logger.warn(
+          `[claude-accounts] 429 sull'endpoint usage per ${base.label}: fermo le sue letture per ${Math.round(attesa / 60_000)} min` +
+            (rifiutiDiFila >= GIRO_FERMO_DOPO_429 ? `; ${rifiutiDiFila} di fila, il resto del giro al prossimo` : ''),
+        )
       } else {
+        tentativi[slot.id] = Date.now()
+        rifiutiDiFila = 0
         logger.warn(`[claude-accounts] usage non disponibile per ${base.label}: ${message}`)
       }
-      accounts.push(fallback(message.includes('429') ? attesaLabel() : message))
+      accounts.push(fallback(message.includes('429') ? attesaLabel(slot.id) : message))
     }
   }
 
