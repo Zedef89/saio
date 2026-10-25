@@ -19,7 +19,9 @@ async function esiste(): Promise<boolean | null> {
 export function SessioneMadrePage() {
   const q = useQuery({ queryKey: ['sessione-madre', 'esiste'], queryFn: esiste, refetchInterval: 30_000 })
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    // Alta quanto la finestra (come Sessioni): così il terminale prende lo spazio che resta e
+    // la barra di input sta sempre in fondo, senza far scorrere la pagina.
+    <div className="flex flex-col h-[calc(100vh-6rem)] gap-3 -m-4 md:-m-6 p-4 md:p-6 min-h-0">
       <div className="flex items-center gap-2">
         <Crown className="w-5 h-5 text-amber-400" />
         <h1 className="text-lg font-semibold">Sessione madre</h1>
@@ -35,7 +37,7 @@ export function SessioneMadrePage() {
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-auto rounded-md border border-amber-500/30">
-          <EmbeddedChat projectId={`tmux-${SESSIONE}`} />
+          <EmbeddedChat projectId={`tmux-${SESSIONE}`} fill />
         </div>
       )}
     </div>
