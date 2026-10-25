@@ -26,6 +26,14 @@ interface EmbeddedChatProps {
    */
   worktreePath?: string
   worktreeLabel?: string
+  /**
+   * Da desktop occupa tutta l'altezza del contenitore invece dei 420px fissi: il terminale
+   * prende lo spazio che resta e la barra di input sta sempre in fondo, visibile. Serve dove
+   * la chat vive in un pannello alto quanto la finestra (Sessioni): con l'altezza fissa, a
+   * finestra bassa o con lo zoom, il pannello scorreva e la barra finiva sotto. Su telefono
+   * il pannello è troppo basso: lì restano i 420px e scorre la pagina.
+   */
+  fill?: boolean
 }
 
 interface SessionInfo {
@@ -128,7 +136,7 @@ async function promoteChoicesToInbox(
   })
 }
 
-export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel }: EmbeddedChatProps) {
+export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel, fill }: EmbeddedChatProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -151,6 +159,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
   const [forceNew, setForceNew] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const inputAreaRef = useRef<HTMLDivElement>(null)
   const [dragActive, setDragActive] = useState(false)
   // V14.1: tick incrementato a onopen/onclose del WS per derivare reattivamente
   // l'abilitazione dell'input bar dal readyState corrente di wsRef.
@@ -906,15 +915,31 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     return () => root.classList.remove('saio-terminal-fullscreen')
   }, [fullscreen])
 
+  // Entrando a tutto schermo il box esce dal flusso e il contenitore che scorre torna in
+  // cima: uscendo, la barra di input restava sotto la piega finché non si riapriva la
+  // vista. La riportiamo in vista appena il box è rientrato nella pagina (anche il
+  // fullscreen nativo, che finisce dopo, con la sua animazione).
+  const revealInput = useCallback(() => {
+    requestAnimationFrame(() => inputAreaRef.current?.scrollIntoView({ block: 'nearest' }))
+  }, [])
+  const wasFullscreenRef = useRef(false)
+  useEffect(() => {
+    if (wasFullscreenRef.current && !fullscreen) revealInput()
+    wasFullscreenRef.current = fullscreen
+  }, [fullscreen, revealInput])
+
   // Uscita dal fullscreen nativo con il tasto indietro o il gesto di sistema: senza questo
   // il box CSS restava aperto e la pagina sembrava incastrata a metà.
   useEffect(() => {
     const onFsChange = () => {
-      if (!document.fullscreenElement) setFullscreen(false)
+      if (!document.fullscreenElement) {
+        setFullscreen(false)
+        revealInput()
+      }
     }
     document.addEventListener('fullscreenchange', onFsChange)
     return () => document.removeEventListener('fullscreenchange', onFsChange)
-  }, [])
+  }, [revealInput])
 
   // Drag&drop di file sul terminale (desktop). In Tauri il drag&drop di file è gestito
   // a livello webview (gli eventi DOM 'drop' non arrivano) e ci dà direttamente il PATH
@@ -963,6 +988,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
       ref={wrapperRef}
       className={cn(
         className,
+        fill && !fullscreen && 'lg:h-full lg:min-h-0 flex flex-col',
         fullscreen && 'fixed inset-0 z-50 bg-background flex flex-col rounded-none border-0 overscroll-contain saio-fullscreen'
       )}
       // Su mobile 100dvh segue la barra dinamica del browser: senza, il box fullscreen
@@ -1172,8 +1198,12 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
           A tutto schermo il terminale prende l'altezza residua (flex-1): con l'altezza
           fissa restava una fascia nera enorme sotto la barra di input. */}
       <div
-        className={cn('relative w-full', fullscreen && 'flex-1 min-h-0')}
-        style={fullscreen ? undefined : { height: '420px' }}
+        className={cn(
+          'relative w-full',
+          fullscreen && 'flex-1 min-h-0',
+          fill && !fullscreen && 'h-[420px] shrink-0 lg:h-auto lg:shrink lg:flex-1 lg:min-h-[200px]'
+        )}
+        style={fullscreen || fill ? undefined : { height: '420px' }}
       >
         <div
           ref={containerRef}
@@ -1242,6 +1272,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
       </div>
 
       {/* Chat input bar + settings + quick choices */}
+      <div ref={inputAreaRef}>
       <ChatInputBar
         onSend={(t) => sendText(t, true)}
         onQuickChoice={sendChoice}
@@ -1256,6 +1287,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
         providerName={effectiveCli}
         projectId={projectId}
       />
+      </div>
 
       {/* V14.23 — Dialog SAIO-style per "Nuova conversazione" (rimpiazzo confirm() nativo) */}
       <Dialog open={freshConfirmOpen} onOpenChange={setFreshConfirmOpen}>

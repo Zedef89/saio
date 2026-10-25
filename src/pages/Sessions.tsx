@@ -772,7 +772,7 @@ export function SessionsPage() {
                   <Button size="sm" variant="ghost" className="ml-auto h-6 px-2 text-[10px]" onClick={() => setSelected(null)}>Chiudi vista</Button>
                 </div>
                 <div className="flex-1 min-h-0 overflow-auto">
-                  <EmbeddedChat key={selected} projectId={`tmux-${selected}`} />
+                  <EmbeddedChat key={selected} projectId={`tmux-${selected}`} fill />
                 </div>
               </div>
             )}
