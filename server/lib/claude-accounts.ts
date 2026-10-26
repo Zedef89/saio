@@ -501,8 +501,21 @@ function attesaLabel(id: string): string {
   return `Anthropic limita le letture · riprovo alle ${ora}`
 }
 
+let aggiornamento: Promise<ClaudeAccount[]> | null = null
+
 export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]> {
-  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.accounts
+  // Tutti i chiamanti condividono il giro in corso, anche premendo aggiorna.
+  if (aggiornamento) return aggiornamento
+  if (cache && Date.now() - cache.at < (force ? 30_000 : CACHE_TTL_MS)) return cache.accounts
+  aggiornamento = aggiornaAccount()
+  try {
+    return await aggiornamento
+  } finally {
+    aggiornamento = null
+  }
+}
+
+async function aggiornaAccount(): Promise<ClaudeAccount[]> {
 
   const slots = await discoverSlots()
   const snaps = await loadSnapshots()

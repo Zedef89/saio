@@ -199,6 +199,14 @@ function tonoFinestra(percent: number): string {
  */
 function FinestreAccount({ a }: { a: ClaudeAccount }) {
   if (!a.usage) return <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
+  if (a.stale) return (
+    <span className="block text-[10px] text-amber-500 whitespace-normal">
+      Disponibilità non verificata
+      <span className="block text-[9px] text-muted-foreground">
+        Ultima lettura {a.staleMinutes ?? '?'} min fa · aggiornamento non riuscito
+      </span>
+    </span>
+  )
   const weekly = a.usage.weeklyPercent
   const session = a.usage.sessionPercent
   const piena = weekly >= 100 ? 'settimana esaurita' : session >= 100 ? '5 ore esaurite' : null
@@ -214,8 +222,7 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
       </span>
       <span className="block text-[9px] text-muted-foreground/70">
         {piena ? `${piena} · ` : ''}
-        {/* Nicola 13/10: col dato vecchio (dopo un 429) si mostra ANCHE quando si ripristina: l'ora del reset resta valida. */}
-        {a.stale ? `dato di ${a.staleMinutes} min fa · ` : ''}{resetLabel(reset)}
+        {resetLabel(reset)}
       </span>
     </>
   )
@@ -366,10 +373,13 @@ export function SessionsPage() {
     queryFn: () => fetchClaudeAccounts(),
     enabled: showNew || switchFor !== null,
     staleTime: 60_000,
+    refetchInterval: 60_000,
   })
 
   const accounts = accountsQuery.data?.accounts ?? []
-  const freestId = accountsQuery.data?.freestId ?? null
+  const freestId = accounts.find((a) =>
+    !a.stale && a.usage && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100
+  )?.id ?? null
   // Preselezione automatica del più libero, finché Nicola non sceglie a mano.
   const pickedAccount = newAccount ?? freestId
 
