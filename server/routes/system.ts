@@ -919,7 +919,7 @@ export function systemRouter(): Router {
     try {
       const { listClaudeAccounts } = await import('../lib/claude-accounts')
       const accounts = await listClaudeAccounts(req.query.refresh === '1')
-      res.json({ accounts, freestId: accounts.find((a) => a.usage)?.id ?? null })
+      res.json({ accounts, freestId: accounts.find((a) => !a.stale && a.usage && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100)?.id ?? null })
     } catch (err) {
       res.status(500).json({ error: 'accounts_failed', message: (err as Error).message })
     }

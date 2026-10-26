@@ -378,13 +378,15 @@ export function UsagePage() {
   const { data, isLoading, refetch } = useQuery<Overview>({
     queryKey: ['usage-overview'],
     queryFn: async () => {
-      const res = await fetch('/api/system/usage-overview', { credentials: 'include' })
+      const res = await fetch('/api/system/usage-overview?refresh=1', { credentials: 'include' })
       if (!res.ok) throw new Error('lettura non riuscita')
       return res.json()
     },
-    // Le percentuali hanno comunque una cache di 5 minuti lato server (l'endpoint di Anthropic
-    // limita per IP): interrogare piu' spesso non darebbe dati piu' freschi, solo 429.
-    refetchInterval: (q) => (q.state.data?.scan.scanning ? 4000 : 60_000),
+    // Lettura solo entrando nella pagina o premendo aggiorna; nessun polling delle quote.
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   })
 
   async function aggiorna() {

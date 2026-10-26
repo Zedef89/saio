@@ -462,6 +462,7 @@ function toAccountInfo(
       id: slot, label: slot, email: null, weeklyPercent: null, sessionPercent: null,
       severity: null, exhausted: false, exhaustedWindow: null, resetsAt: null,
     }
+  const usage = acc.stale ? null : acc.usage
   // >=100% e' il caso in cui la sessione risponderebbe solo "You've hit your limit". Vale per
   // TUTTE e due le finestre: quella delle 5 ore si riempie per prima e blocca allo stesso modo.
   //
@@ -474,24 +475,24 @@ function toAccountInfo(
   const rispondeAncora = rispostaRiuscita != null && Date.now() - rispostaRiuscita < PROVA_RISPOSTA_MS
   const ancoraChiusa = (percent: number | null | undefined, resetsAt: string | null | undefined) =>
     !rispondeAncora && (percent ?? 0) >= 100 && !(resetsAt && Date.parse(resetsAt) <= Date.now())
-  const settimanaPiena = ancoraChiusa(acc.usage?.weeklyPercent, acc.usage?.weeklyResetsAt)
-  const cinqueOrePiene = ancoraChiusa(acc.usage?.sessionPercent, acc.usage?.sessionResetsAt)
+  const settimanaPiena = ancoraChiusa(usage?.weeklyPercent, usage?.weeklyResetsAt)
+  const cinqueOrePiene = ancoraChiusa(usage?.sessionPercent, usage?.sessionResetsAt)
   return {
     id: acc.id,
     label: acc.label,
     email: acc.email,
-    weeklyPercent: acc.usage?.weeklyPercent ?? null,
-    sessionPercent: acc.usage?.sessionPercent ?? null,
-    severity: acc.usage?.severity ?? null,
+    weeklyPercent: usage?.weeklyPercent ?? null,
+    sessionPercent: usage?.sessionPercent ?? null,
+    severity: usage?.severity ?? null,
     exhausted: settimanaPiena || cinqueOrePiene,
     exhaustedWindow: settimanaPiena ? 'settimana' : cinqueOrePiene ? '5 ore' : null,
     // L'ora che conta e' quella della finestra che blocca: dire "reset lunedi'" quando a
     // sbloccare sono le 5 ore fa rimandare il lavoro di tre giorni per niente.
     resetsAt: (settimanaPiena
-      ? acc.usage?.weeklyResetsAt
+      ? usage?.weeklyResetsAt
       : cinqueOrePiene
-        ? acc.usage?.sessionResetsAt
-        : acc.usage?.weeklyResetsAt) ?? null,
+        ? usage?.sessionResetsAt
+        : usage?.weeklyResetsAt) ?? null,
   }
 }
 

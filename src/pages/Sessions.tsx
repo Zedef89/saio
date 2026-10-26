@@ -148,7 +148,7 @@ interface ClaudeAccount {
 }
 
 /** Già ordinati dal più libero al più carico dal server. */
-async function fetchClaudeAccounts(refresh = false): Promise<{ accounts: ClaudeAccount[]; freestId: string | null }> {
+async function fetchClaudeAccounts(refresh = true): Promise<{ accounts: ClaudeAccount[]; freestId: string | null }> {
   const res = await fetch(`/api/system/claude-accounts${refresh ? '?refresh=1' : ''}`, { credentials: 'include' })
   if (!res.ok) return { accounts: [], freestId: null }
   return res.json()
@@ -373,7 +373,9 @@ export function SessionsPage() {
     queryFn: () => fetchClaudeAccounts(),
     enabled: showNew || switchFor !== null,
     staleTime: 60_000,
-    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   })
 
   const accounts = accountsQuery.data?.accounts ?? []

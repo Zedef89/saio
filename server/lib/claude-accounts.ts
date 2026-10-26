@@ -485,7 +485,8 @@ let cache: { at: number; accounts: ClaudeAccount[] } | null = null
 
 /**
  * Elenco account con utilizzo, ordinato dal più libero al più carico.
- * `force` salta la cache (bottone "aggiorna" nella modale).
+ * Senza `force` legge solo dati locali. `force` abilita una lettura su richiesta,
+ * sempre condivisa e soggetta a cache e Retry-After.
  */
 /** Perche' il dato manca e quando tornera': un "n/d" secco non aiuta a scegliere. */
 function attesaLabel(id: string): string {
@@ -504,9 +505,12 @@ function attesaLabel(id: string): string {
 let aggiornamento: Promise<ClaudeAccount[]> | null = null
 
 export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]> {
+  // Le liste e i refresh della UI leggono solo il disco. La rete serve esclusivamente
+  // per una scelta esplicita dell'account (force=true), mai per mostrare le sessioni.
+  if (!force) return aggiornaAccount(true)
   // Tutti i chiamanti condividono il giro in corso, anche premendo aggiorna.
   if (aggiornamento) return aggiornamento
-  if (cache && Date.now() - cache.at < (force ? 30_000 : CACHE_TTL_MS)) return cache.accounts
+  if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.accounts
   aggiornamento = aggiornaAccount()
   try {
     return await aggiornamento
@@ -515,7 +519,7 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
   }
 }
 
-async function aggiornaAccount(): Promise<ClaudeAccount[]> {
+async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
 
   const slots = await discoverSlots()
   const snaps = await loadSnapshots()
@@ -525,11 +529,10 @@ async function aggiornaAccount(): Promise<ClaudeAccount[]> {
   // piu' veloce per prendersi un 429 e restare senza percentuali proprio quando servono.
   let rifiutiDiFila = 0
   for (const [i, slot] of ordineLettura(slots, snaps, tentativi).entries()) {
-    if (i > 0) await new Promise((r) => setTimeout(r, SPACING_MS))
+    if (!soloCache && i > 0) await new Promise((r) => setTimeout(r, SPACING_MS))
     const email = await readEmail(slot)
     const plan = await readPlan(slot)
     const base = { id: slot.id, label: labelFor(email, slot), email, isDefault: slot.isDefault, plan }
-    const token = await readAccessToken(slot)
 
     /** Ultimo dato buono, se abbastanza fresco da dire ancora qualcosa. */
     const fallback = (motivo: string): ClaudeAccount => {
@@ -547,6 +550,22 @@ async function aggiornaAccount(): Promise<ClaudeAccount[]> {
       return { ...base, usage: null, error: motivo }
     }
 
+    if (soloCache) {
+      const snap = snaps[slot.id]
+      if (snap && Date.now() - snap.at < CACHE_TTL_MS) {
+        accounts.push({ ...base, usage: snap.usage, error: null })
+      } else {
+        accounts.push(fallback('Apri la scelta account per aggiornare'))
+      }
+      continue
+    }
+    // Un account appena letto non si rilegge solo per aggiornare gli altri.
+    const recente = snaps[slot.id]
+    if (recente && Date.now() - recente.at < CACHE_TTL_MS) {
+      accounts.push({ ...base, usage: recente.usage, error: null })
+      continue
+    }
+    const token = await readAccessToken(slot)
     if (!token) {
       accounts.push(fallback('non autenticato'))
       continue
@@ -563,6 +582,7 @@ async function aggiornaAccount(): Promise<ClaudeAccount[]> {
     }
 
     try {
+      logger.info(`[claude-accounts] richiesta usage per ${base.label}: scelta account esplicita`)
       const usage = await fetchUsage(token)
       await saveSnapshot(slot.id, usage)
       delete attese[slot.id]
@@ -591,7 +611,7 @@ async function aggiornaAccount(): Promise<ClaudeAccount[]> {
   // Ordinati sulla finestra piu' piena delle due, non sulla sola settimanale.
   // Chi non risponde finisce in fondo: non è candidabile a "più libero".
   accounts.sort((a, b) => caricoDi(a.usage) - caricoDi(b.usage))
-  cache = { at: Date.now(), accounts }
+  if (!soloCache) cache = { at: Date.now(), accounts }
   return accounts
 }
 
