@@ -568,6 +568,32 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     // mouse SGR, così anche da telefono a scorrere è Claude. Il TAP (senza movimento) non
     // viene prevenuto, quindi continua ad aprire la tastiera / posizionare il cursore.
     const containerEl = containerRef.current
+    // Codex usa lo schermo alternato senza richiedere il mouse: non c'è
+    // scrollback locale e gli eventi SGR vengono ignorati. PageUp/PageDown
+    // scorrono invece la sua conversazione. Claude continua a ricevere il mouse.
+    const needsPageScroll = () => term.buffer.active.type === 'alternate'
+      && term.modes.mouseTrackingMode === 'none'
+    const sendPage = (up: boolean) => {
+      const sock = wsRef.current
+      if (sock?.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'data', data: up ? '\x1b[5~' : '\x1b[6~' }))
+      }
+    }
+    let pageWheelAccum = 0
+    let lastPageWheelAt = 0
+    const onPageWheel = (e: WheelEvent) => {
+      if (!needsPageScroll() || e.ctrlKey || e.deltaY === 0) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      const now = Date.now()
+      if (now - lastPageWheelAt > 250 || Math.sign(pageWheelAccum) !== Math.sign(e.deltaY)) pageWheelAccum = 0
+      lastPageWheelAt = now
+      pageWheelAccum += e.deltaY * (e.deltaMode === 1 ? 18 : e.deltaMode === 2 ? containerEl!.clientHeight : 1)
+      if (Math.abs(pageWheelAccum) >= 80) {
+        sendPage(pageWheelAccum < 0)
+        pageWheelAccum = 0
+      }
+    }
     const TOUCH_WHEEL_SENSITIVITY = 1.4 // eventi rotella per cella di movimento del dito
     let touchY = 0
     let wheelAccum = 0
@@ -580,6 +606,15 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
       const dy = touchY - y // dy<0 = dito verso il basso = risali nella conversazione
       touchY = y
       const cellH = containerEl && term.rows > 0 ? containerEl.clientHeight / term.rows : 18
+      if (needsPageScroll()) {
+        e.preventDefault()
+        wheelAccum += dy
+        if (Math.abs(wheelAccum) >= 80) {
+          sendPage(wheelAccum < 0)
+          wheelAccum = 0
+        }
+        return
+      }
       wheelAccum += (dy / cellH) * TOUCH_WHEEL_SENSITIVITY
       const steps = Math.trunc(wheelAccum)
       if (steps === 0) return
@@ -618,6 +653,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
 
     // Il wheel è solo OSSERVATO (passive, niente preventDefault/stopPropagation): deve
     // continuare ad arrivare a Claude, che è chi scorre davvero la conversazione.
+    containerEl?.addEventListener('wheel', onPageWheel, { passive: false, capture: true })
     containerEl?.addEventListener('wheel', markScrolling, { passive: true })
     containerEl?.addEventListener('touchstart', onTouchStart, { passive: true })
     containerEl?.addEventListener('touchmove', onTouchMove, { passive: false })
@@ -642,6 +678,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
       window.removeEventListener('resize', onResize)
       if (repaintRaf) cancelAnimationFrame(repaintRaf)
       scrollRepaintRef.current = null
+      containerEl?.removeEventListener('wheel', onPageWheel, true)
       containerEl?.removeEventListener('wheel', markScrolling)
       containerEl?.removeEventListener('touchstart', onTouchStart)
       containerEl?.removeEventListener('touchmove', onTouchMove)
