@@ -571,8 +571,17 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     // Codex usa lo schermo alternato senza richiedere il mouse: non c'è
     // scrollback locale e gli eventi SGR vengono ignorati. PageUp/PageDown
     // scorrono invece la sua conversazione. Claude continua a ricevere il mouse.
-    const needsPageScroll = () => term.buffer.active.type === 'alternate'
-      && term.modes.mouseTrackingMode === 'none'
+    const needsPageScroll = () => {
+      if (term.modes.mouseTrackingMode !== 'none') return false
+      if (term.buffer.active.type === 'alternate') return true
+      // Il replay PTY è limitato a 1 MB: può aver perso l'escape che apriva
+      // lo schermo alternato. Riconosci anche il footer della CLI ripristinata.
+      const buffer = term.buffer.active
+      const footer = Array.from({ length: Math.min(8, term.rows) }, (_, i) =>
+        buffer.getLine(buffer.baseY + term.rows - 1 - i)?.translateToString(true) || ''
+      ).join('\n')
+      return /GPT-\d|← for agents|OpenAI Codex/i.test(footer)
+    }
     const sendPage = (up: boolean) => {
       const sock = wsRef.current
       if (sock?.readyState === WebSocket.OPEN) {
@@ -655,8 +664,8 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     // continuare ad arrivare a Claude, che è chi scorre davvero la conversazione.
     containerEl?.addEventListener('wheel', onPageWheel, { passive: false, capture: true })
     containerEl?.addEventListener('wheel', markScrolling, { passive: true })
-    containerEl?.addEventListener('touchstart', onTouchStart, { passive: true })
-    containerEl?.addEventListener('touchmove', onTouchMove, { passive: false })
+    containerEl?.addEventListener('touchstart', onTouchStart, { passive: true, capture: true })
+    containerEl?.addEventListener('touchmove', onTouchMove, { passive: false, capture: true })
     containerEl?.addEventListener('touchend', markScrolling, { passive: true })
 
     // Copia automatica alla selezione, come nel Terminale del Mac.
@@ -680,8 +689,8 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
       scrollRepaintRef.current = null
       containerEl?.removeEventListener('wheel', onPageWheel, true)
       containerEl?.removeEventListener('wheel', markScrolling)
-      containerEl?.removeEventListener('touchstart', onTouchStart)
-      containerEl?.removeEventListener('touchmove', onTouchMove)
+      containerEl?.removeEventListener('touchstart', onTouchStart, true)
+      containerEl?.removeEventListener('touchmove', onTouchMove, true)
       containerEl?.removeEventListener('touchend', markScrolling)
       intentionalCloseRef.current = true // chiusura voluta (unmount/cambio sessione)
       ws.close()
@@ -1245,7 +1254,14 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
         <div
           ref={containerRef}
           className="w-full h-full bg-[#0a0a0a]"
+          style={{ touchAction: 'none' }}
         />
+        {!readOnly && status === 'ready' && (
+          <div className="absolute right-2 top-2 z-10 flex gap-1">
+            <Button size="sm" variant="secondary" className="h-8 px-2" onClick={() => sendKeys('\x1b[5~')} title="Pagina precedente" aria-label="Pagina precedente">↑</Button>
+            <Button size="sm" variant="secondary" className="h-8 px-2" onClick={() => sendKeys('\x1b[6~')} title="Pagina successiva" aria-label="Pagina successiva">↓</Button>
+          </div>
+        )}
         {dragActive && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-primary/15 backdrop-blur-[1px] border-2 border-dashed border-primary/60 pointer-events-none">
             <div className="flex items-center gap-2 text-primary text-sm font-medium bg-background/80 px-4 py-2 rounded-lg">

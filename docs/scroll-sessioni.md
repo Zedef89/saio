@@ -13,3 +13,11 @@ Prova: Chromium con xterm reale, schermo alternato e mouse spento: rotella su/gi
 e pan touch generano PageUp/PageDown. Con mouse attivo o buffer normale nessun
 PageUp/PageDown viene generato. Build TypeScript/Vite verde. Nella sessione live
 Codex `nicola-riordino-gruppi`, PageUp ha riportato a schermo la risposta precedente.
+
+Aggiornamento dello stesso giorno: il replay PTY (massimo 1 MB) può non
+contenere più l'escape iniziale dello schermo alternato. In assenza di mouse,
+il footer Codex attiva lo stesso percorso anche nel buffer normale ricostruito.
+Prova Chromium aggiuntiva: buffer normale con footer GPT, PageUp generato.
+I listener touch usano la fase capture; touch-action:none impedisce al browser
+di cancellare il pan prima della soglia. Pulsanti ↑/↓ inviano esplicitamente
+PageUp/PageDown, anche nelle sessioni già aperte.
