@@ -4,6 +4,7 @@ import { classifyScreen, findCodexPid } from '../tmux-runtime'
 const footer = '\n› Ask Codex to do anything\nGPT-6.1-Sol default · ~/dev\n← for agents · ? for shortcuts'
 test('Codex working, idle and previous question resolved', () => {
   assert.equal(classifyScreen('• Working (11s • esc to interrupt)' + footer).activity, 'working')
+  assert.equal(classifyScreen('• Waiting for background terminal (9m 50s • esc to interrupt) · 2 background terminals\n  └ git diff --check; git diff --stat HEAD; rg testi\n  └ Tip: Use /statusline to configure which items appear in the status line.' + footer).activity, 'working')
   assert.equal(classifyScreen('• Correzione completata.\nWorked for 4s' + footer).activity, 'idle')
   assert.equal(classifyScreen('Vuoi che proceda?\n› procedi\n• Modifica completata.' + footer).activity, 'idle')
 })

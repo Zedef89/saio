@@ -260,7 +260,7 @@ export function classifyScreen(raw: string, now = Date.now()): ScreenState {
   if (/GPT-[\w.-]+|OpenAI Codex|← for agents/.test(screen)) {
     const lines = screen.split('\n')
     const live = lines.slice(-12).join('\n')
-    const working = /(?:Working|Thinking|Planning|Searching|Running|Reconnecting)[^\n]*esc to interrupt/i.test(live)
+    const working = /(?:Working|Thinking|Planning|Searching|Running|Reconnecting|Waiting for background terminal)[^\n]*esc to interrupt/i.test(live)
     const menu = /(?:❯|›)\s*1[.)]\s/.test(live) && /(?:2[.)]\s|Enter to confirm)/i.test(live)
     // L'ultima risposta, prima del prompt: una domanda vecchia non deve restare attiva.
     const reversePrompt = [...lines].reverse().findIndex((l) => /^\s*›/.test(l))
