@@ -130,6 +130,7 @@ async function fetchProjectsLite(): Promise<ProjectLite[]> {
 }
 
 interface ClaudeAccount {
+  liveSessions?: number | null
   id: string
   label: string
   email: string | null
@@ -994,6 +995,7 @@ export function SessionsPage() {
                     >
                       <Circle className={cn('w-2 h-2 shrink-0', picked ? 'fill-primary text-primary' : 'text-muted-foreground/40')} />
                       <span className="font-mono text-xs min-w-0 break-all">{a.label}</span>
+                      <span className="text-[9px] text-muted-foreground">{a.liveSessions == null ? 'sessioni n/d' : `${a.liveSessions} ${a.liveSessions === 1 ? 'sessione viva' : 'sessioni vive'}`}</span>
                       {a.id === freestId && accounts.length > 1 && (
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>
                       )}
@@ -1061,6 +1063,7 @@ export function SessionsPage() {
                 >
                   <Circle className={cn('w-2 h-2 shrink-0', current ? 'fill-primary text-primary' : 'text-muted-foreground/40')} />
                   <span className="font-mono text-xs min-w-0 break-all">{a.label}</span>
+                      <span className="text-[9px] text-muted-foreground">{a.liveSessions == null ? 'sessioni n/d' : `${a.liveSessions} ${a.liveSessions === 1 ? 'sessione viva' : 'sessioni vive'}`}</span>
                   {current && <span className="text-[9px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">in uso ora</span>}
                   {a.id === freestId && !current && accounts.length > 1 && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>

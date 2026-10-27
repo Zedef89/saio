@@ -515,6 +515,51 @@ export async function readActivity(session: string, dataDir = DATA_DIR()): Promi
   return (await readScreen(session, dataDir)).activity
 }
 
+/** Conta sessioni, non processi/window duplicati; nessuna lettura delle quote in rete. */
+export async function contaSessioniPerAccount(
+  panes: Array<{ name: string; pid: number }>, rows: ProcRow[],
+  configForPid: (pid: number) => Promise<string | null> = readConfigDir,
+): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {}
+  const seen = new Set<string>()
+  // I prompt nei parametri di codex possono contenere la parola Claude: non sono un binario Claude.
+  const commands = rows.map(r => {
+    const words = r.args.trim().split(/\s+/)
+    const exe = path.basename(words[0])
+    const native = exe === 'claude' || exe === 'claude.exe'
+    const wrapper = (exe === 'node' || exe === 'bun') && !!words[1] &&
+      (words[1].includes('@anthropic-ai/claude-code') || path.basename(words[1]) === 'claude')
+    return { ...r, args: native || wrapper ? 'claude' : exe }
+  })
+  for (const pane of panes) {
+    if (seen.has(pane.name) || pane.name.startsWith('__saio-quota-')) continue
+    const pid = findClaudePid(commands, pane.pid)
+    if (!pid) continue
+    seen.add(pane.name)
+    const id = slotFromConfigDir(await configForPid(pid))
+    counts[id] = (counts[id] || 0) + 1
+  }
+  return counts
+}
+
+export async function sessioniVivePerAccount(): Promise<Record<string, number> | null> {
+  try {
+    const { tmuxOvunque } = await import('./tmux-cmd')
+    const [stdout, rows] = await Promise.all([
+      tmuxOvunque(DATA_DIR(), ['list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'], { timeout: 4000 }),
+      processTable(),
+    ])
+    const panes = stdout.trim().split('\n').filter(Boolean).map(line => {
+      const [name, pid] = line.split('|')
+      return { name, pid: Number(pid) }
+    })
+    return await contaSessioniPerAccount(panes, rows)
+  } catch (err) {
+    logger.warn(`[claude-accounts] conteggio sessioni non disponibile: ${String(err).slice(0, 120)}`)
+    return null
+  }
+}
+
 /**
  * Runtime di tutte le sessioni, in una passata: mappa nome-sessione → {account, activity}.
  * Non solleva mai: se qualcosa non e' leggibile, quella sessione resta senza dati extra e la

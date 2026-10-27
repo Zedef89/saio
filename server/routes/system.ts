@@ -919,7 +919,9 @@ export function systemRouter(): Router {
     try {
       const { listClaudeAccounts, aggiornaQuoteInBackground, aggiornamentoQuoteInCorso } = await import('../lib/claude-accounts')
       if (req.query.refresh === '1') aggiornaQuoteInBackground()
-      const accounts = await listClaudeAccounts()
+      const { sessioniVivePerAccount } = await import('../lib/tmux-runtime')
+      const [readAccounts, live] = await Promise.all([listClaudeAccounts(), sessioniVivePerAccount()])
+      const accounts = readAccounts.map(a => ({ ...a, liveSessions: live ? live[a.id] || 0 : null }))
       res.json({ accounts, updating: aggiornamentoQuoteInCorso(), freestId: accounts.find((a) => !a.stale && a.usage && a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100)?.id ?? null })
     } catch (err) {
       res.status(500).json({ error: 'accounts_failed', message: (err as Error).message })
