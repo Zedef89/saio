@@ -510,7 +510,7 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
   if (!force) return aggiornaAccount(true)
   // Tutti i chiamanti condividono il giro in corso, anche premendo aggiorna.
   if (aggiornamento) return aggiornamento
-  if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.accounts
+  if (cache && Date.now() - cache.at < CACHE_TTL_MS) return aggiornaAccount(true)
   aggiornamento = aggiornaAccount()
   try {
     return await aggiornamento
@@ -533,6 +533,19 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
     const email = await readEmail(slot)
     const plan = await readPlan(slot)
     const base = { id: slot.id, label: labelFor(email, slot), email, isDefault: slot.isDefault, plan }
+    // Claude Code espone le quote nella statusline: preferire il dato locale alle
+    // richieste OAuth. Si rilegge da disco anche nei refresh passivi delle sessioni.
+    try {
+      const local = JSON.parse(await fs.readFile(path.join(slot.configDir, 'saio-usage-local.json'), 'utf8')) as UsageSnapshot
+      const u = local.usage
+      if (Number.isFinite(local.at) && local.at <= Date.now() &&
+          Date.now() - local.at < CACHE_TTL_MS &&
+          Number.isFinite(u?.weeklyPercent) && u.weeklyPercent >= 0 &&
+          Number.isFinite(u?.sessionPercent) && u.sessionPercent >= 0) {
+        accounts.push({ ...base, usage: u, error: null })
+        continue
+      }
+    } catch { /* nessuna quota locale disponibile: usare il percorso esistente */ }
 
     /** Ultimo dato buono, se abbastanza fresco da dire ancora qualcosa. */
     const fallback = (motivo: string): ClaudeAccount => {
