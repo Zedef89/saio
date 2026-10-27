@@ -148,7 +148,7 @@ interface ClaudeAccount {
 }
 
 /** Già ordinati dal più libero al più carico dal server. */
-async function fetchClaudeAccounts(refresh = true): Promise<{ accounts: ClaudeAccount[]; freestId: string | null }> {
+async function fetchClaudeAccounts(refresh = true): Promise<{ accounts: ClaudeAccount[]; freestId: string | null; updating?: boolean }> {
   const res = await fetch(`/api/system/claude-accounts${refresh ? '?refresh=1' : ''}`, { credentials: 'include' })
   if (!res.ok) return { accounts: [], freestId: null }
   return res.json()
@@ -199,14 +199,6 @@ function tonoFinestra(percent: number): string {
  */
 function FinestreAccount({ a }: { a: ClaudeAccount }) {
   if (!a.usage) return <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
-  if (a.stale) return (
-    <span className="block text-[10px] text-amber-500 whitespace-normal">
-      Disponibilità non verificata
-      <span className="block text-[9px] text-muted-foreground">
-        Ultima lettura {a.staleMinutes ?? '?'} min fa · aggiornamento non riuscito
-      </span>
-    </span>
-  )
   const weekly = a.usage.weeklyPercent
   const session = a.usage.sessionPercent
   const piena = weekly != null && weekly >= 100 ? 'settimana esaurita' : session != null && session >= 100 ? '5 ore esaurite' : null
@@ -216,13 +208,13 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
   return (
     <>
       <span className="text-[11px] font-medium">
-        <span className={weekly == null ? 'text-muted-foreground' : tonoFinestra(weekly)}>{weekly == null ? 'Settimana n/d' : `${weekly}% settimana`}</span>
+        <span className={a.stale || weekly == null ? 'text-muted-foreground' : tonoFinestra(weekly)}>{weekly == null ? 'Settimana n/d' : `${weekly}% settimana`}</span>
         <span className="text-muted-foreground/50"> · </span>
-        <span className={session == null ? 'text-muted-foreground' : tonoFinestra(session)}>{session == null ? '5 ore n/d' : `${session}% 5 ore`}</span>
+        <span className={a.stale || session == null ? 'text-muted-foreground' : tonoFinestra(session)}>{session == null ? '5 ore n/d' : `${session}% 5 ore`}</span>
       </span>
       <span className="block text-[9px] text-muted-foreground/70">
-        {piena ? `${piena} · ` : ''}
-        {resetLabel(reset)}
+        {a.stale ? `Ultima lettura ${a.staleMinutes} min fa · ` : piena ? `${piena} · ` : ''}
+        {a.stale ? (a.error || 'aggiorna su richiesta') : resetLabel(reset)}
       </span>
     </>
   )
@@ -370,8 +362,9 @@ export function SessionsPage() {
   // Interroga Anthropic: si carica solo con la modale aperta, non a ogni refresh della pagina.
   const accountsQuery = useQuery({
     queryKey: ['claude', 'accounts'],
-    queryFn: () => fetchClaudeAccounts(),
+    queryFn: ({ client }) => fetchClaudeAccounts(!client.getQueryData<{ updating?: boolean }>(['claude', 'accounts'])?.updating),
     enabled: showNew || switchFor !== null,
+    refetchInterval: (q) => q.state.data?.updating ? 1000 : false,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
@@ -961,7 +954,7 @@ export function SessionsPage() {
                     }}
                     className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
                   >
-                    <RefreshCw className={cn('w-3 h-3', accountsQuery.isFetching && 'animate-spin')} />
+                    <RefreshCw className={cn('w-3 h-3', (accountsQuery.isFetching || accountsQuery.data?.updating) && 'animate-spin')} />
                     aggiorna
                   </button>
                 </div>

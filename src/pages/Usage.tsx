@@ -84,6 +84,7 @@ interface AccountRow {
   tokens: AccountTokens | null
 }
 interface Overview {
+  quotaUpdating?: boolean
   accounts: AccountRow[]
   scan: { scanning: boolean; scannedFiles: number; totalFiles: number; updatedAt: string | null }
 }
@@ -378,13 +379,15 @@ export function UsagePage() {
 
   const { data, isLoading, refetch } = useQuery<Overview>({
     queryKey: ['usage-overview'],
-    queryFn: async () => {
-      const res = await fetch('/api/system/usage-overview?refresh=1', { credentials: 'include' })
+    queryFn: async ({ client }) => {
+      const updating = client.getQueryData<Overview>(['usage-overview'])?.quotaUpdating
+      const res = await fetch(`/api/system/usage-overview${updating ? '' : '?refresh=1'}`, { credentials: 'include' })
       if (!res.ok) throw new Error('lettura non riuscita')
       return res.json()
     },
     // Lettura solo entrando nella pagina o premendo aggiorna; nessun polling delle quote.
     staleTime: 5 * 60_000,
+    refetchInterval: (q) => q.state.data?.quotaUpdating || q.state.data?.scan.scanning ? 1000 : false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: false,

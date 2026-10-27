@@ -13,10 +13,10 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { logger } from './logger'
 
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
-const FETCH_TIMEOUT_MS = 5000
 /**
  * Quanto vale una lettura prima di rifarla. Era un minuto, ma la lista sessioni interroga gli
  * account a ogni giro e la pagina si aggiorna ogni 5 secondi: significavano ~4 richieste al
@@ -35,12 +35,6 @@ const CACHE_TTL_MS = 5 * 60_000
  * insistere. Se Anthropic manda `Retry-After`, vale quello quando e' piu' lungo.
  */
 const BACKOFF_STEPS_MS = [2 * 60_000, 5 * 60_000, 10 * 60_000, 20 * 60_000]
-
-/**
- * Tanti 429 di fila nello stesso giro, su account diversi, vogliono dire che il limite e' della
- * macchina e non dei singoli account: il giro si ferma li', gli altri si servono dalla cache.
- */
-const GIRO_FERMO_DOPO_429 = 3
 
 /** Un dato vecchio piu' di cosi' non dice piu' niente di utile: meglio dichiararlo assente. */
 const STALE_MAX_MS = 6 * 60 * 60_000
@@ -83,15 +77,11 @@ export function attesaDopo429(rifiuti: number, retryAfter: string | null): numbe
   return retryAfter && Number.isFinite(secondi) && secondi > 0 ? Math.max(scala, secondi * 1000) : scala
 }
 
-/** Errore di lettura che si porta dietro il `Retry-After` del 429, se c'era. */
-class ErroreUsage extends Error {
-  constructor(
-    message: string,
-    readonly retryAfter: string | null = null,
-  ) {
-    super(message)
-  }
+/** Un fallimento della CLI non deve riavviare verifiche ripetute. */
+class ErroreQuota extends Error {
+  constructor(message: string, readonly retryAt?: number) { super(message) }
 }
+const erroriLettura: Record<string, string> = {}
 /** Ultima lettura fallita per un motivo dell'account (401, timeout), non per il 429: tiene in fondo al giro chi non risponde. */
 const tentativi: Record<string, number> = {}
 
@@ -229,19 +219,9 @@ interface AccountSlot {
 
 const HOME = process.env.HOME || os.homedir()
 
-/**
- * Una cartella `~/.claude-<slot>` e' un account solo se dentro c'e' davvero una config di
- * Claude Code. Il nome da solo non basta: in home ci sono cartelle che si chiamano cosi' per
- * tutt'altro motivo — `~/.claude-memory` e' un symlink alle memorie condivise
- * (`/srv/taskless/memorie`), `~/.claude-memory-staging` una loro vecchia copia — e comparivano
- * nella schermata "scegli l'account" come due account perennemente "non autenticato".
- *
- * Un account vero ha almeno uno di questi: le credenziali, il `.claude.json`, o la cartella
- * `projects/` con le conversazioni. Chi ne ha uno con il token scaduto continua a comparire
- * (con l'errore): quello e' un account da riloggare, non una cartella omonima.
- */
+/** Account autenticati: una cartella di soli progetti non e' un abbonamento. */
 async function eUnaConfigClaude(dir: string): Promise<boolean> {
-  for (const prova of ['.credentials.json', '.claude.json', 'projects']) {
+  for (const prova of ['.credentials.json']) {
     try {
       await fs.stat(path.join(dir, prova))
       return true
@@ -278,7 +258,7 @@ async function discoverSlots(): Promise<AccountSlot[]> {
           }
         }
       }
-      if (match) {
+      if (match && match[1] !== 'default') {
         const configDir = path.join(HOME, entry.name)
         if (await eUnaConfigClaude(configDir)) slots.push({ id: match[1], configDir, isDefault: false })
       }
@@ -442,43 +422,18 @@ function estraiDettaglio(data: Record<string, unknown>): ClaudeUsageDetail {
   }
 }
 
-async function fetchUsage(token: string): Promise<ClaudeAccountUsage> {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const res = await fetch(USAGE_URL, {
-      headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
-      signal: ctrl.signal,
-    })
-    if (!res.ok) {
-      throw new ErroreUsage(
-        res.status === 401 ? 'token scaduto — riapri una sessione con questo account' : `HTTP ${res.status}`,
-        res.headers.get('retry-after'),
-      )
-    }
-    const data = await res.json()
-    const weekly = Number(data?.seven_day?.utilization ?? 0)
-    const session = Number(data?.five_hour?.utilization ?? 0)
-    // `limits` porta la severità già calcolata lato server: se c'è, vince sulla soglia locale.
-    const limiti: Array<{ kind?: string; severity?: string }> = Array.isArray(data?.limits) ? data.limits : []
-    const weeklyLimit = limiti.find((l) => l?.kind === 'weekly_all')
-    const sessionLimit = limiti.find((l) => l?.kind === 'session')
-    return {
-      weeklyPercent: weekly,
-      sessionPercent: session,
-      weeklyResetsAt: data?.seven_day?.resets_at ?? null,
-      sessionResetsAt: data?.five_hour?.resets_at ?? null,
-      // La severita' e' la peggiore delle due finestre: un account fresco di settimana ma con le
-      // 5 ore piene non e' "normal", apre e sbatte sul limite.
-      severity: peggiore(
-        (weeklyLimit?.severity as ClaudeAccountUsage['severity']) || severityOf(weekly),
-        (sessionLimit?.severity as ClaudeAccountUsage['severity']) || severityOf(session),
-      ),
-      detail: estraiDettaglio(data),
-    }
-  } finally {
-    clearTimeout(timer)
+/** Stesso /usage della CLI: legge anche gli header della verifica minima di quota. */
+async function fetchUsage(slot: AccountSlot): Promise<ClaudeAccountUsage> {
+  const { stdout } = await promisify(execFile)('python3', [
+    process.env.SAIO_QUOTA_READER || path.join(process.cwd(), 'scripts/claude-quota-read.py'), slot.configDir,
+  ], { timeout: 35_000, maxBuffer: 64_000 })
+  const result = JSON.parse(stdout.trim())
+  if (result.result === 'ok' && result.usage &&
+      (Number.isFinite(result.usage.weeklyPercent) || Number.isFinite(result.usage.sessionPercent))) {
+    return result.usage as ClaudeAccountUsage
   }
+  const reason = Array.isArray(result.windows) ? result.windows.find((s: string) => s.includes('rate limited')) : null
+  throw new ErroreQuota(reason ? `Claude: ${reason}` : 'Claude non ha restituito quote aggiornate', result.retryAt)
 }
 
 let cache: { at: number; accounts: ClaudeAccount[] } | null = null
@@ -519,6 +474,12 @@ export async function listClaudeAccounts(force = false): Promise<ClaudeAccount[]
   }
 }
 
+/** La UI legge subito la cache; un aggiornamento esplicito continua in background. */
+export function aggiornaQuoteInBackground(): void {
+  void listClaudeAccounts(true).catch((err) => logger.warn(`[claude-accounts] aggiornamento quote: ${String(err).slice(0, 120)}`))
+}
+export function aggiornamentoQuoteInCorso(): boolean { return aggiornamento !== null }
+
 async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
 
   const slots = await discoverSlots()
@@ -527,7 +488,6 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
 
   // Sequenziale e distanziato: quattro richieste insieme allo stesso endpoint sono il modo
   // piu' veloce per prendersi un 429 e restare senza percentuali proprio quando servono.
-  let rifiutiDiFila = 0
   for (const [i, slot] of ordineLettura(slots, snaps, tentativi).entries()) {
     if (!soloCache && i > 0) await new Promise((r) => setTimeout(r, SPACING_MS))
     const email = await readEmail(slot)
@@ -539,12 +499,15 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
       const local = JSON.parse(await fs.readFile(path.join(slot.configDir, 'saio-usage-local.json'), 'utf8')) as UsageSnapshot
       const u = local.usage
       if (Number.isFinite(local.at) && local.at <= Date.now() &&
-          Date.now() - local.at < CACHE_TTL_MS &&
+          Date.now() - local.at < STALE_MAX_MS &&
           (u?.weeklyPercent != null || u?.sessionPercent != null) &&
           (u?.weeklyPercent == null || (Number.isFinite(u.weeklyPercent) && u.weeklyPercent >= 0)) &&
           (u?.sessionPercent == null || (Number.isFinite(u.sessionPercent) && u.sessionPercent >= 0))) {
-        accounts.push({ ...base, usage: u, error: null })
-        continue
+        if (!snaps[slot.id] || snaps[slot.id].at < local.at) snaps[slot.id] = local
+        if (Date.now() - local.at < CACHE_TTL_MS) {
+          accounts.push({ ...base, usage: u, error: null })
+          continue
+        }
       }
     } catch { /* nessuna quota locale disponibile: usare il percorso esistente */ }
 
@@ -556,7 +519,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
         return {
           ...base,
           usage: snap.usage,
-          error: null,
+          error: motivo,
           stale: true,
           staleMinutes: Math.round(age / 60_000),
         }
@@ -569,7 +532,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
       if (snap && Date.now() - snap.at < CACHE_TTL_MS) {
         accounts.push({ ...base, usage: snap.usage, error: null })
       } else {
-        accounts.push(fallback('Apri la scelta account per aggiornare'))
+        accounts.push(fallback(erroriLettura[slot.id] || 'Quota da verificare con aggiorna'))
       }
       continue
     }
@@ -587,38 +550,24 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
 
     // Finestra di riposo dopo un 429 di questo account: si serve la cache senza nemmeno provare.
     if (Date.now() < (attese[slot.id]?.fino ?? 0)) {
-      accounts.push(fallback(attesaLabel(slot.id)))
-      continue
-    }
-    if (rifiutiDiFila >= GIRO_FERMO_DOPO_429) {
-      accounts.push(fallback('lettura rimandata al prossimo giro'))
+      accounts.push(fallback(erroriLettura[slot.id] || attesaLabel(slot.id)))
       continue
     }
 
     try {
       logger.info(`[claude-accounts] richiesta usage per ${base.label}: scelta account esplicita`)
-      const usage = await fetchUsage(token)
+      const usage = await fetchUsage(slot)
       await saveSnapshot(slot.id, usage)
       delete attese[slot.id]
-      rifiutiDiFila = 0
+      delete erroriLettura[slot.id]
       accounts.push({ ...base, usage, error: null })
     } catch (err) {
       const message = (err as Error).name === 'AbortError' ? 'timeout' : (err as Error).message
-      if (message.includes('429')) {
-        const rifiuti = attese[slot.id]?.rifiuti ?? 0
-        const attesa = attesaDopo429(rifiuti, err instanceof ErroreUsage ? err.retryAfter : null)
-        attese[slot.id] = { fino: Date.now() + attesa, rifiuti: rifiuti + 1 }
-        rifiutiDiFila += 1
-        logger.warn(
-          `[claude-accounts] 429 sull'endpoint usage per ${base.label}: fermo le sue letture per ${Math.round(attesa / 60_000)} min` +
-            (rifiutiDiFila >= GIRO_FERMO_DOPO_429 ? `; ${rifiutiDiFila} di fila, il resto del giro al prossimo` : ''),
-        )
-      } else {
-        tentativi[slot.id] = Date.now()
-        rifiutiDiFila = 0
-        logger.warn(`[claude-accounts] usage non disponibile per ${base.label}: ${message}`)
-      }
-      accounts.push(fallback(message.includes('429') ? attesaLabel(slot.id) : message))
+      tentativi[slot.id] = Date.now()
+      erroriLettura[slot.id] = message
+      attese[slot.id] = { fino: Math.max(Date.now() + CACHE_TTL_MS, err instanceof ErroreQuota ? err.retryAt || 0 : 0), rifiuti: 0 }
+      logger.warn(`[claude-accounts] quota CLI non disponibile per ${base.label}: ${message}`)
+      accounts.push(fallback(message))
     }
   }
 

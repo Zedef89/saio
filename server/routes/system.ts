@@ -249,7 +249,7 @@ export function systemRouter(): Router {
             owner: ownerFromName(name, owners),
           }
         })
-        .filter((s) => s.name)
+        .filter((s) => s.name && !s.name.startsWith('__saio-quota-'))
       // Le sessioni che il semi-loop apre da solo (`<persona>-leva-…`, `<persona>-risolve-…`)
       // portano il prefisso di una persona solo per avere i suoi accessi: girano nel tmux di
       // root, nessuno le deve guardare e si cancellano da sole a fine lavoro. A un guest non
@@ -917,9 +917,10 @@ export function systemRouter(): Router {
 
   router.get('/claude-accounts', async (req, res) => {
     try {
-      const { listClaudeAccounts } = await import('../lib/claude-accounts')
-      const accounts = await listClaudeAccounts(req.query.refresh === '1')
-      res.json({ accounts, freestId: accounts.find((a) => !a.stale && a.usage && a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100)?.id ?? null })
+      const { listClaudeAccounts, aggiornaQuoteInBackground, aggiornamentoQuoteInCorso } = await import('../lib/claude-accounts')
+      if (req.query.refresh === '1') aggiornaQuoteInBackground()
+      const accounts = await listClaudeAccounts()
+      res.json({ accounts, updating: aggiornamentoQuoteInCorso(), freestId: accounts.find((a) => !a.stale && a.usage && a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100)?.id ?? null })
     } catch (err) {
       res.status(500).json({ error: 'accounts_failed', message: (err as Error).message })
     }
@@ -931,16 +932,18 @@ export function systemRouter(): Router {
   // ?refresh=1 forza la rilettura delle percentuali; ?rescan=1 forza anche la scansione dei transcript.
   router.get('/usage-overview', async (req, res) => {
     try {
-      const [{ listClaudeAccounts }, { claudeTokenStats }] = await Promise.all([
+      const [{ listClaudeAccounts, aggiornaQuoteInBackground, aggiornamentoQuoteInCorso }, { claudeTokenStats }] = await Promise.all([
         import('../lib/claude-accounts'),
         import('../lib/claude-usage-stats'),
       ])
+      if (req.query.refresh === '1') aggiornaQuoteInBackground()
       const [accounts, tokens] = await Promise.all([
-        listClaudeAccounts(req.query.refresh === '1'),
+        listClaudeAccounts(),
         claudeTokenStats(req.query.rescan === '1'),
       ])
       res.json({
         accounts: accounts.map((a) => ({ ...a, tokens: tokens.accounts[a.id] ?? null })),
+        quotaUpdating: aggiornamentoQuoteInCorso(),
         scan: {
           scanning: tokens.scanning,
           scannedFiles: tokens.scannedFiles,
