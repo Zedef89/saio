@@ -1,11 +1,12 @@
 type ResearchAccount = {
   id: string
+  stale?: boolean
   usage: { weeklyPercent: number | null; sessionPercent: number | null } | null
 }
 
 /** Non avviare una ricerca sul default esaurito, né scegliere un account alla cieca. */
 export function researchAccount(accounts: ResearchAccount[], requested?: string): string {
-  const available = accounts.filter(a => a.usage &&
+  const available = accounts.filter(a => !a.stale && a.usage &&
     a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100)
   if (requested) {
     if (!available.some(a => a.id === requested)) throw new Error('Account sconosciuto, esaurito o quota non disponibile')

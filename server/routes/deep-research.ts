@@ -45,7 +45,7 @@ export function deepResearchRouter() {
       const { listClaudeAccounts, configDirForAccount } = await import('../lib/claude-accounts')
       let accountId: string
       try {
-        accountId = researchAccount(await listClaudeAccounts(true), account)
+        accountId = researchAccount(await listClaudeAccounts(), account)
       } catch (error) {
         return res.status(409).json({ error: (error as Error).message })
       }

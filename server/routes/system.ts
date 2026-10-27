@@ -932,11 +932,10 @@ export function systemRouter(): Router {
   // ?refresh=1 forza la rilettura delle percentuali; ?rescan=1 forza anche la scansione dei transcript.
   router.get('/usage-overview', async (req, res) => {
     try {
-      const [{ listClaudeAccounts, aggiornaQuoteInBackground, aggiornamentoQuoteInCorso }, { claudeTokenStats }] = await Promise.all([
+      const [{ listClaudeAccounts, aggiornamentoQuoteInCorso }, { claudeTokenStats }] = await Promise.all([
         import('../lib/claude-accounts'),
         import('../lib/claude-usage-stats'),
       ])
-      if (req.query.refresh === '1') aggiornaQuoteInBackground()
       const [accounts, tokens] = await Promise.all([
         listClaudeAccounts(),
         claudeTokenStats(req.query.rescan === '1'),

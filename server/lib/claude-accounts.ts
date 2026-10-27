@@ -130,7 +130,8 @@ async function saveSnapshot(id: string, usage: ClaudeAccountUsage): Promise<void
 /** Etichette corte per gli account noti; per gli altri si usa la parte prima della @. */
 const LABEL_ALIASES: Record<string, string> = {
   'fyroadv@gmail.com': 'fyro',
-  'tech@komandaprint.it': 'tech',
+  'tech@komandaprint.it': 'techkomanda',
+  'tech@piu-prenotazioni.com': 'tech+pre',
   'alessandro.pisano.eth@gmail.com': 'ale',
 }
 
@@ -208,6 +209,7 @@ export interface ClaudeAccount {
   /** true quando la percentuale non è appena letta ma ripescata dall'ultima lettura riuscita. */
   stale?: boolean
   /** Da quanti minuti risale il dato mostrato, quando è `stale`. */
+  readAt?: number
   staleMinutes?: number
 }
 
@@ -433,7 +435,8 @@ async function fetchUsage(slot: AccountSlot): Promise<ClaudeAccountUsage> {
     return result.usage as ClaudeAccountUsage
   }
   const reason = Array.isArray(result.windows) ? result.windows.find((s: string) => s.includes('rate limited')) : null
-  throw new ErroreQuota(reason ? `Claude: ${reason}` : 'Claude non ha restituito quote aggiornate', result.retryAt)
+  const until = result.retryAt ? new Date(result.retryAt).toLocaleString('it-IT', { timeZone: 'Europe/Rome', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : null
+  throw new ErroreQuota(until ? `Lettura quote limitata · riprova il ${until}` : reason ? `Claude: ${reason}` : 'Claude non ha restituito quote aggiornate', result.retryAt)
 }
 
 let cache: { at: number; accounts: ClaudeAccount[] } | null = null
@@ -505,7 +508,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
           (u?.sessionPercent == null || (Number.isFinite(u.sessionPercent) && u.sessionPercent >= 0))) {
         if (!snaps[slot.id] || snaps[slot.id].at < local.at) snaps[slot.id] = local
         if (Date.now() - local.at < CACHE_TTL_MS) {
-          accounts.push({ ...base, usage: u, error: null })
+          accounts.push({ ...base, usage: u, error: null, readAt: local.at })
           continue
         }
       }
@@ -522,6 +525,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
           error: motivo,
           stale: true,
           staleMinutes: Math.round(age / 60_000),
+          readAt: snap.at,
         }
       }
       return { ...base, usage: null, error: motivo }
@@ -530,7 +534,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
     if (soloCache) {
       const snap = snaps[slot.id]
       if (snap && Date.now() - snap.at < CACHE_TTL_MS) {
-        accounts.push({ ...base, usage: snap.usage, error: null })
+        accounts.push({ ...base, usage: snap.usage, error: null, readAt: snap.at })
       } else {
         accounts.push(fallback(erroriLettura[slot.id] || 'Quota da verificare con aggiorna'))
       }
@@ -539,7 +543,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
     // Un account appena letto non si rilegge solo per aggiornare gli altri.
     const recente = snaps[slot.id]
     if (recente && Date.now() - recente.at < CACHE_TTL_MS) {
-      accounts.push({ ...base, usage: recente.usage, error: null })
+      accounts.push({ ...base, usage: recente.usage, error: null, readAt: recente.at })
       continue
     }
     const token = await readAccessToken(slot)
@@ -560,7 +564,7 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
       await saveSnapshot(slot.id, usage)
       delete attese[slot.id]
       delete erroriLettura[slot.id]
-      accounts.push({ ...base, usage, error: null })
+      accounts.push({ ...base, usage, error: null, readAt: Date.now() })
     } catch (err) {
       const message = (err as Error).name === 'AbortError' ? 'timeout' : (err as Error).message
       tentativi[slot.id] = Date.now()

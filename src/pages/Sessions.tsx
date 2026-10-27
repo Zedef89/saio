@@ -144,6 +144,7 @@ interface ClaudeAccount {
   error: string | null
   /** La percentuale è l'ultima letta, non una lettura fresca (endpoint usage limitato). */
   stale?: boolean
+  readAt?: number
   staleMinutes?: number
 }
 
@@ -197,14 +198,20 @@ function tonoFinestra(percent: number): string {
  * sola settimanale in vista, un account al 27% di settimana e al 98% delle 5 ore risultava
  * "più libero" e apriva già a limite.
  */
+function oraQuota(at: string | number | null | undefined): string {
+  if (at == null) return 'n/d'
+  const d = new Date(at)
+  return Number.isFinite(d.getTime()) ? d.toLocaleString('it-IT', {
+    timeZone: 'Europe/Rome', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  }) : 'n/d'
+}
+
 function FinestreAccount({ a }: { a: ClaudeAccount }) {
-  if (!a.usage) return <span className="text-[10px] text-muted-foreground">{a.error || 'n/d'}</span>
+  if (!a.usage) return <span className="text-[10px] text-muted-foreground">{a.error || 'Quota da verificare'}</span>
   const weekly = a.usage.weeklyPercent
   const session = a.usage.sessionPercent
-  const piena = weekly != null && weekly >= 100 ? 'settimana esaurita' : session != null && session >= 100 ? '5 ore esaurite' : null
-  // Il reset che serve è quello della finestra più carica: se a bloccare sono le 5 ore, l'ora
-  // della settimanale sposta l'attesa di giorni invece che di minuti.
-  const reset = (session ?? -1) > (weekly ?? -1) ? (a.usage.sessionResetsAt ?? null) : a.usage.weeklyResetsAt
+  const resetBlocco = weekly != null && weekly >= 100 ? a.usage.weeklyResetsAt
+    : session != null && session >= 100 ? a.usage.sessionResetsAt : null
   return (
     <>
       <span className="text-[11px] font-medium">
@@ -212,10 +219,14 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
         <span className="text-muted-foreground/50"> · </span>
         <span className={a.stale || session == null ? 'text-muted-foreground' : tonoFinestra(session)}>{session == null ? '5 ore n/d' : `${session}% 5 ore`}</span>
       </span>
-      <span className="block text-[9px] text-muted-foreground/70">
-        {a.stale ? `Ultima lettura ${a.staleMinutes} min fa · ` : piena ? `${piena} · ` : ''}
-        {a.stale ? (a.error || 'aggiorna su richiesta') : resetLabel(reset)}
+      {resetBlocco && <span className="block text-[10px] text-destructive">{a.stale ? 'Ultima lettura: esaurito' : 'Esaurito'} fino al {oraQuota(resetBlocco)}</span>}
+      <span className="block text-[9px] text-muted-foreground">
+        Reset 5h: {oraQuota(a.usage.sessionResetsAt)} · settimana: {oraQuota(a.usage.weeklyResetsAt)}
       </span>
+      <span className="block text-[9px] text-muted-foreground">
+        Letto {oraQuota(a.readAt)}{a.stale ? ` · ${a.staleMinutes} min fa` : ''}
+      </span>
+      {a.error && <span className="block text-[9px] text-amber-500">{a.error}</span>}
     </>
   )
 }
@@ -362,7 +373,7 @@ export function SessionsPage() {
   // Interroga Anthropic: si carica solo con la modale aperta, non a ogni refresh della pagina.
   const accountsQuery = useQuery({
     queryKey: ['claude', 'accounts'],
-    queryFn: ({ client }) => fetchClaudeAccounts(!client.getQueryData<{ updating?: boolean }>(['claude', 'accounts'])?.updating),
+    queryFn: ({ client }) => fetchClaudeAccounts(showNew && !client.getQueryData<{ updating?: boolean }>(['claude', 'accounts'])?.updating),
     enabled: showNew || switchFor !== null,
     refetchInterval: (q) => q.state.data?.updating ? 1000 : false,
     staleTime: 60_000,
