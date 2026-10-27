@@ -31,6 +31,7 @@ interface SessionAccount {
 }
 
 interface TmuxSession {
+  cli?: 'claude' | 'codex' | 'shell'
   name: string
   windows: number
   attached: boolean
@@ -486,6 +487,7 @@ export function SessionsPage() {
   // tutto espanso voleva dire chiudere nove gruppi a ogni visita. Se chi guarda non ha
   // sessioni (o il server non sa chi e') si apre tutto, altrimenti la lista sembrerebbe vuota.
   // `toggledGroups` tiene solo i clic, sopra a quel default.
+  const [closedEngines, setClosedEngines] = useState<Record<string, boolean>>({})
   const [toggledGroups, setToggledGroups] = useState<Record<string, boolean>>({})
   const me = sessionsQuery.data?.me ?? null
   const groups = (() => {
@@ -590,7 +592,23 @@ export function SessionsPage() {
                     {attivi > 0 && <span className="text-amber-400 normal-case">· {attivi} al lavoro</span>}
                     {fermi > 0 && <span className="text-red-400 normal-case">· {fermi} a limite</span>}
                   </button>
-                  {!chiuso && g.items.map((s) => {
+                  {!chiuso && (['codex', 'claude', 'shell'] as const).map((cli) => {
+                    const items = g.items.filter((s) => (s.cli ?? (s.account ? 'claude' : 'shell')) === cli)
+                    if (!items.length) return null
+                    const key = `${g.key}:${cli}`
+                    const closed = closedEngines[key] ?? false
+                    const workingCount = items.filter((s) => s.activity === 'working').length
+                    const waitingCount = items.filter((s) => s.activity === 'waiting').length
+                    return <div key={key} className="ml-2 border-l border-border pl-1">
+                      <button aria-expanded={!closed} onClick={() => setClosedEngines((p) => ({ ...p, [key]: !closed }))}
+                        className="w-full flex flex-wrap items-center gap-1.5 px-2 py-2 text-[11px] text-muted-foreground hover:text-foreground">
+                        {closed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        <span className={cli === 'codex' ? 'text-sky-400 font-medium' : 'font-medium'}>{cli === 'codex' ? 'Codex' : cli === 'claude' ? 'Claude' : 'Terminali'}</span>
+                        <span>({items.length})</span>
+                        {workingCount > 0 && <span className="text-amber-400">· {workingCount} al lavoro</span>}
+                        {waitingCount > 0 && <span className="text-red-400">· {waitingCount} aspetta te</span>}
+                      </button>
+                      {!closed && items.map((s) => {
                 const isSel = selected === s.name
                 const folder = s.cwd ? s.cwd.split('/').filter(Boolean).pop() : ''
                 const working = s.activity === 'working'
@@ -676,7 +694,8 @@ export function SessionsPage() {
                             </span>
                           )}
                           <span>· {uptimeLabel(s.created)}</span>
-                          {s.attached && <span className="text-emerald-400">· in uso</span>}
+                          {s.cli === 'codex' && <span className="text-sky-400">· Codex</span>}
+                          {s.activity === 'idle' && !exhausted && !s.limit && <span>· pronto</span>}
                           {s.account && (
                             <span
                               className={cn(
@@ -757,6 +776,8 @@ export function SessionsPage() {
                   </div>
                 )
                   })}
+                    </div>
+                  })}
                 </div>
                 )
               })}
@@ -789,7 +810,7 @@ export function SessionsPage() {
                   <Button size="sm" variant="ghost" className="ml-auto h-6 px-2 text-[10px]" onClick={() => setSelected(null)}>Chiudi vista</Button>
                 </div>
                 <div className="flex-1 min-h-0 overflow-auto">
-                  <EmbeddedChat key={selected} projectId={`tmux-${selected}`} fill />
+                  <EmbeddedChat key={selected} projectId={`tmux-${selected}`} cliOverride={sessions.find((s) => s.name === selected)?.cli} fill />
                 </div>
               </div>
             )}

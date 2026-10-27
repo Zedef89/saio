@@ -243,6 +243,7 @@ export function systemRouter(): Router {
             cwd,
             project,
             worktree,
+            cli: runtime?.cli ?? 'shell',
             account: runtime?.account ?? null,
             activity: runtime?.activity ?? 'shell',
             limit: runtime?.limit ?? null,

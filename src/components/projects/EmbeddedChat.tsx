@@ -18,6 +18,7 @@ import { api } from '@/lib/api'
 import { ptyWsUrl } from '@/lib/pty-ws'
 
 interface EmbeddedChatProps {
+  cliOverride?: 'claude' | 'codex' | 'shell'
   projectId: string
   className?: string
   /**
@@ -136,7 +137,7 @@ async function promoteChoicesToInbox(
   })
 }
 
-export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel, fill }: EmbeddedChatProps) {
+export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel, fill, cliOverride }: EmbeddedChatProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -232,7 +233,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
     providerHintRef.current = effectiveAccount?.providerId
   }, [effectiveAccount])
 
-  const effectiveCli = effectiveAccount?.cliName || 'claude'
+  const effectiveCli = cliOverride || effectiveAccount?.cliName || 'claude'
 
   // Permission prompts parser: detects "1. Yes" / "2. No" / "❯" patterns
   const outputBufRef = useRef<string>('')
@@ -1063,7 +1064,7 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
                     <span className="text-emerald-400">Ripresa conversazione</span>
                     {effectiveAccount && (
                       <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-violet-500/40 text-violet-300">
-                        {effectiveCli} · {effectiveAccount.label}
+                        {effectiveCli}{!cliOverride && effectiveAccount ? ` · ${effectiveAccount.label}` : ''}
                       </Badge>
                     )}
                   </div>
@@ -1085,10 +1086,10 @@ export function EmbeddedChat({ projectId, className, worktreePath, worktreeLabel
             <div className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
               <Sparkles className="w-3 h-3 text-blue-400" />
-              <span className="text-emerald-400">Nuova sessione</span>
-              {effectiveAccount && (
+              <span className="text-emerald-400">{cliOverride ? 'Sessione collegata' : 'Nuova sessione'}</span>
+              {(effectiveAccount || cliOverride) && (
                 <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-violet-500/40 text-violet-300">
-                  {effectiveCli} · {effectiveAccount.label}
+                  {effectiveCli}{!cliOverride && effectiveAccount ? ` · ${effectiveAccount.label}` : ''}
                 </Badge>
               )}
             </div>

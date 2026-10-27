@@ -62,6 +62,7 @@ export interface SessionLimit {
 }
 
 export interface SessionRuntime {
+  cli: 'claude' | 'codex' | 'shell'
   account: SessionAccountInfo | null
   activity: SessionActivity
   limit: SessionLimit | null
@@ -255,6 +256,23 @@ const stripAnsi = (s: string) => s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g,
  */
 export function classifyScreen(raw: string, now = Date.now()): ScreenState {
   const screen = stripAnsi(raw)
+  // Codex ha prompt e piè di pagina diversi da Claude Code.
+  if (/GPT-[\w.-]+|OpenAI Codex|← for agents/.test(screen)) {
+    const lines = screen.split('\n')
+    const live = lines.slice(-12).join('\n')
+    const working = /(?:Working|Thinking|Planning|Searching|Running|Reconnecting)[^\n]*esc to interrupt/i.test(live)
+    const menu = /(?:❯|›)\s*1[.)]\s/.test(live) && /(?:2[.)]\s|Enter to confirm)/i.test(live)
+    // L'ultima risposta, prima del prompt: una domanda vecchia non deve restare attiva.
+    const reversePrompt = [...lines].reverse().findIndex((l) => /^\s*›/.test(l))
+    const prompt = reversePrompt < 0 ? -1 : lines.length - 1 - reversePrompt
+    const prior = lines.slice(0, prompt < 0 ? lines.length : prompt)
+    const previousInput = [...prior].reverse().findIndex((l) => /^\s*›/.test(l))
+    const answer = prior.slice(previousInput < 0 ? 0 : prior.length - previousInput)
+      .filter((l) => l.trim() && !/^\s*(?:Worked for|GPT-|← for agents)/.test(l)).slice(-6).join('\n')
+    const waiting = menu || /(?:approve|approval required|allow this|do you want to|would you like to|vuoi che|confermi|procedo\?|serve il tuo ok|aspetto (?:il tuo|una) )/i.test(answer)
+    return { activity: working ? 'working' : waiting ? 'waiting' : 'idle', limit: null,
+      inputDirty: false, excerpt: answer.slice(-700) }
+  }
   const { convo, footer } = splitScreen(screen)
   // Dopo una risposta la CLI scrive nella casella, in grigio (`\x1b[2m`), il messaggio che si
   // aspetta: non l'ha battuto nessuno. Si toglie il grigio, e quello che resta e' di una persona.
@@ -345,6 +363,21 @@ export function findClaudePid(rows: ProcRow[], panePid: number): number | null {
       }
     }
     frontier = next
+  }
+  return null
+}
+
+/** Riconosce l'eseguibile, mai parole contenute nel prompt passato alla CLI. */
+export function findCodexPid(rows: ProcRow[], panePid: number): number | null {
+  let frontier = [panePid]
+  for (let depth = 0; depth < 5 && frontier.length; depth++) {
+    for (const pid of frontier) {
+      const row = rows.find((r) => r.pid === pid)
+      const tokens = row?.args.trim().split(/\s+/) ?? []
+      const executable = tokens[0]?.split('/').pop()
+      if (executable === 'codex' || (executable === 'node' && /(?:^|\/)codex(?:\.js)?$/.test(tokens[1] ?? ''))) return pid
+    }
+    frontier = rows.filter((r) => frontier.includes(r.ppid)).map((r) => r.pid)
   }
   return null
 }
@@ -587,7 +620,8 @@ export async function sessionRuntimes(dataDir = DATA_DIR()): Promise<Record<stri
     await Promise.all(
       panes.map(async (pane) => {
         if (out[pane.name]) return // una sola window per sessione: la prima basta
-        const claudePid = findClaudePid(rows, pane.pid)
+        const codexPid = findCodexPid(rows, pane.pid)
+        const claudePid = codexPid ? null : findClaudePid(rows, pane.pid)
         let account: SessionAccountInfo | null = null
         if (claudePid) {
           const configDir = await readConfigDir(claudePid)
@@ -598,8 +632,8 @@ export async function sessionRuntimes(dataDir = DATA_DIR()): Promise<Record<stri
           const riuscita = piena ? await ultimaRispostaRiuscita(configDir ?? path.join(os.homedir(), '.claude')) : null
           account = toAccountInfo(acc, slot, riuscita)
         }
-        const screen = claudePid ? await readScreen(pane.name) : null
-        out[pane.name] = { account, activity: screen?.activity ?? 'shell', limit: screen?.limit ?? null }
+        const screen = claudePid || codexPid ? await readScreen(pane.name) : null
+        out[pane.name] = { cli: codexPid ? 'codex' : claudePid ? 'claude' : 'shell', account, activity: screen?.activity ?? 'shell', limit: screen?.limit ?? null }
       })
     )
   } catch (err) {
