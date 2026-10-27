@@ -508,7 +508,7 @@ export function SessionsPage() {
 
   const openNewDialog = () => {
     setNewProjectId('')
-    setNewName('')
+    setNewName(`sessione-${Date.now().toString(36)}`)
     setNewStartClaude(true)
     setNewAccount(null) // torna alla preselezione automatica del più libero
     setShowNew(true)
@@ -984,16 +984,16 @@ export function SessionsPage() {
                       type="button"
                       onClick={() => setNewAccount(a.id)}
                       className={cn(
-                        'w-full flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors',
+                        'w-full min-w-0 flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors',
                         picked ? 'border-primary bg-primary/10' : 'border-input hover:bg-accent/50'
                       )}
                     >
                       <Circle className={cn('w-2 h-2 shrink-0', picked ? 'fill-primary text-primary' : 'text-muted-foreground/40')} />
-                      <span className="font-mono text-xs">{a.label}</span>
+                      <span className="font-mono text-xs min-w-0 break-all">{a.label}</span>
                       {a.id === freestId && accounts.length > 1 && (
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>
                       )}
-                      <span className="ml-auto text-right shrink-0">
+                      <span className="w-full min-w-0 text-left sm:w-auto sm:ml-auto sm:text-right">
                         <FinestreAccount a={a} />
                       </span>
                     </button>
@@ -1050,18 +1050,18 @@ export function SessionsPage() {
                   disabled={current || switchMutation.isPending}
                   onClick={() => switchMutation.mutate({ name: switchFor!, account: a.id })}
                   className={cn(
-                    'w-full flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors',
+                    'w-full min-w-0 flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors',
                     current ? 'border-input opacity-50 cursor-default' : 'border-input hover:bg-accent/50',
                     full && !current && 'opacity-60'
                   )}
                 >
                   <Circle className={cn('w-2 h-2 shrink-0', current ? 'fill-primary text-primary' : 'text-muted-foreground/40')} />
-                  <span className="font-mono text-xs">{a.label}</span>
+                  <span className="font-mono text-xs min-w-0 break-all">{a.label}</span>
                   {current && <span className="text-[9px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">in uso ora</span>}
                   {a.id === freestId && !current && accounts.length > 1 && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500">più libero</span>
                   )}
-                  <span className="ml-auto text-right shrink-0">
+                  <span className="w-full min-w-0 text-left sm:w-auto sm:ml-auto sm:text-right">
                     <FinestreAccount a={a} />
                   </span>
                 </button>
