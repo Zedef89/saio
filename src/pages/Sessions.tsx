@@ -135,8 +135,8 @@ interface ClaudeAccount {
   email: string | null
   isDefault: boolean
   usage: {
-    weeklyPercent: number
-    sessionPercent: number
+    weeklyPercent: number | null
+    sessionPercent: number | null
     weeklyResetsAt: string | null
     sessionResetsAt?: string | null
     severity: 'normal' | 'warning' | 'critical'
@@ -209,16 +209,16 @@ function FinestreAccount({ a }: { a: ClaudeAccount }) {
   )
   const weekly = a.usage.weeklyPercent
   const session = a.usage.sessionPercent
-  const piena = weekly >= 100 ? 'settimana esaurita' : session >= 100 ? '5 ore esaurite' : null
+  const piena = weekly != null && weekly >= 100 ? 'settimana esaurita' : session != null && session >= 100 ? '5 ore esaurite' : null
   // Il reset che serve è quello della finestra più carica: se a bloccare sono le 5 ore, l'ora
   // della settimanale sposta l'attesa di giorni invece che di minuti.
-  const reset = session > weekly ? (a.usage.sessionResetsAt ?? null) : a.usage.weeklyResetsAt
+  const reset = (session ?? -1) > (weekly ?? -1) ? (a.usage.sessionResetsAt ?? null) : a.usage.weeklyResetsAt
   return (
     <>
       <span className="text-[11px] font-medium">
-        <span className={tonoFinestra(weekly)}>{weekly}% settimana</span>
+        <span className={weekly == null ? 'text-muted-foreground' : tonoFinestra(weekly)}>{weekly == null ? 'Settimana n/d' : `${weekly}% settimana`}</span>
         <span className="text-muted-foreground/50"> · </span>
-        <span className={tonoFinestra(session)}>{session}% 5 ore</span>
+        <span className={session == null ? 'text-muted-foreground' : tonoFinestra(session)}>{session == null ? '5 ore n/d' : `${session}% 5 ore`}</span>
       </span>
       <span className="block text-[9px] text-muted-foreground/70">
         {piena ? `${piena} · ` : ''}
@@ -380,7 +380,7 @@ export function SessionsPage() {
 
   const accounts = accountsQuery.data?.accounts ?? []
   const freestId = accounts.find((a) =>
-    !a.stale && a.usage && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100
+    !a.stale && a.usage && a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 100 && a.usage.sessionPercent < 100
   )?.id ?? null
   // Preselezione automatica del più libero, finché Nicola non sceglie a mano.
   const pickedAccount = newAccount ?? freestId
@@ -1042,7 +1042,7 @@ export function SessionsPage() {
               const current = sessions.find((x) => x.name === switchFor)?.account?.id === a.id
               // "Pieno" vale per l'una o per l'altra finestra: spostare la sessione su un account
               // con le 5 ore finite la rimette a limite subito dopo il riavvio.
-              const full = !!a.usage && (a.usage.weeklyPercent >= 100 || a.usage.sessionPercent >= 100)
+              const full = !!a.usage && ((a.usage.weeklyPercent ?? 0) >= 100 || (a.usage.sessionPercent ?? 0) >= 100)
               return (
                 <button
                   key={a.id}

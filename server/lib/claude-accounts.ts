@@ -194,8 +194,8 @@ export interface ClaudeUsageDetail {
 }
 
 export interface ClaudeAccountUsage {
-  weeklyPercent: number
-  sessionPercent: number
+  weeklyPercent: number | null
+  sessionPercent: number | null
   weeklyResetsAt: string | null
   /** Quando riparte la finestra di 5 ore. `null` quando non ce n'e' una aperta (0%). */
   sessionResetsAt?: string | null
@@ -366,7 +366,7 @@ function peggiore(
  * prima risposta era il limite.
  */
 export function caricoDi(usage: ClaudeAccountUsage | null): number {
-  if (!usage) return 101 // chi non risponde non e' candidabile a "piu' libero"
+  if (!usage || usage.weeklyPercent == null || usage.sessionPercent == null) return 101 // chi non risponde non e' candidabile a "piu' libero"
   return Math.max(usage.weeklyPercent ?? 0, usage.sessionPercent ?? 0)
 }
 
@@ -540,8 +540,9 @@ async function aggiornaAccount(soloCache = false): Promise<ClaudeAccount[]> {
       const u = local.usage
       if (Number.isFinite(local.at) && local.at <= Date.now() &&
           Date.now() - local.at < CACHE_TTL_MS &&
-          Number.isFinite(u?.weeklyPercent) && u.weeklyPercent >= 0 &&
-          Number.isFinite(u?.sessionPercent) && u.sessionPercent >= 0) {
+          (u?.weeklyPercent != null || u?.sessionPercent != null) &&
+          (u?.weeklyPercent == null || (Number.isFinite(u.weeklyPercent) && u.weeklyPercent >= 0)) &&
+          (u?.sessionPercent == null || (Number.isFinite(u.sessionPercent) && u.sessionPercent >= 0))) {
         accounts.push({ ...base, usage: u, error: null })
         continue
       }

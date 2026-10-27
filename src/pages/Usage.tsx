@@ -37,7 +37,7 @@ interface AccountTokens {
   lastDay: string | null
 }
 interface UsageWindow {
-  percent: number
+  percent: number | null
   resetsAt: string | null
   limitDollars: number | null
   usedDollars: number | null
@@ -53,8 +53,8 @@ interface AccountRow {
   stale?: boolean
   staleMinutes?: number
   usage: {
-    weeklyPercent: number
-    sessionPercent: number
+    weeklyPercent: number | null
+    sessionPercent: number | null
     weeklyResetsAt: string | null
     severity: 'normal' | 'warning' | 'critical'
     detail?: {
@@ -151,10 +151,11 @@ function BarraFinestra({
 }: {
   icona: React.ReactNode
   titolo: string
-  percent: number
+  percent: number | null
   resetsAt: string | null
   nota?: string
 }) {
+  if (percent == null) return <div className="text-xs text-muted-foreground">{titolo}: dato non disponibile</div>
   const tono = tonoDi(percent)
   return (
     <div className="space-y-1.5">
@@ -277,7 +278,7 @@ function SchedaAccount({ a }: { a: AccountRow }) {
             </div>
             <div className="truncate text-xs text-muted-foreground">{a.email ?? 'account non identificato'}</div>
           </div>
-          {a.usage && (
+          {a.usage?.weeklyPercent != null && (
             <Badge variant="outline" className={cn('shrink-0', tono.badge)}>
               {Math.max(0, 100 - Math.round(a.usage.weeklyPercent))}% settimana disponibile
             </Badge>
@@ -405,7 +406,7 @@ export function UsagePage() {
   // Libero = sotto il 75% su ENTRAMBE le finestre: con le 5 ore piene l'account non parte,
   // per quanto vuota sia la settimana.
   const liberi = accounts.filter(
-    (a) => a.usage != null && a.usage.weeklyPercent < 75 && a.usage.sessionPercent < 75
+    (a) => a.usage != null && a.usage.weeklyPercent != null && a.usage.sessionPercent != null && a.usage.weeklyPercent < 75 && a.usage.sessionPercent < 75
   ).length
 
   return (

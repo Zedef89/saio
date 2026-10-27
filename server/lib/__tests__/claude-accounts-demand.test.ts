@@ -53,6 +53,14 @@ test('nessuna rete nelle liste; scelta esplicita condivisa e cache anche su aggi
     const explicitLocal = await listClaudeAccounts(true)
     assert.equal(explicitLocal[0].usage?.sessionPercent, 61)
     assert.equal(calls, 2, 'dati statusline nuovi visibili subito, senza rete anche su aggiorna')
+    await fs.writeFile(path.join(dir, '.claude', 'saio-usage-local.json'), JSON.stringify({
+      at: now, usage: {weeklyPercent: 72, sessionPercent: null, weeklyResetsAt: null, severity: 'normal'},
+    }))
+    const partial = await listClaudeAccounts()
+    assert.equal(partial[0].usage?.weeklyPercent, 72)
+    assert.equal(partial[0].usage?.sessionPercent, null, 'finestra assente non trasformata in zero')
+    assert.equal(calls, 2)
+
   } finally {
     Date.now = realNow
     globalThis.fetch = oldFetch
